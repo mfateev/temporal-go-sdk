@@ -153,11 +153,19 @@ type (
 		// Optional: The identifier of the resource consumed by sessions.
 		// It's the user's responsibility to ensure there's only one worker using this resourceID.
 		// For now, if user doesn't specify one, a new uuid will be used as the resourceID.
-		// SessionResourceID string
+		SessionResourceID string
 
 		// Optional: Sets the maximum number of concurrently running sessions the resource supports.
 		// default: 1000
 		MaxConcurrentSessionExecutionSize int
+
+		// Optional: Time to reestablish session after worker restart.
+		// During this interval the worker only accepts requests to reestablish sessions
+		// and does not listen to new session requests.
+		// After this interval the requests to reestablish session are still accepted,
+		// but they compete for slots with newly started sessions.
+		// default: 10s
+		SessionReestablishingInterval time.Duration
 
 		// Optional: If set to true, a workflow worker is not started for this
 		// worker and workflows cannot be registered with this worker. Use this if
