@@ -68,7 +68,7 @@ type (
 	}
 
 	recreateSessionParams struct {
-		Taskqueue string
+		TaskQueue string
 	}
 
 	SessionState int
@@ -83,7 +83,7 @@ type (
 		CompleteSession(sessionID string)
 		AddSessionToken()
 		SignalCreationResponse(ctx context.Context, sessionID string) error
-		GetResourceSpecificTaskqueue() string
+		GetResourceSpecificTaskQueue() string
 		GetTokenBucket() *sessionTokenBucket
 	}
 
@@ -91,12 +91,12 @@ type (
 		*sync.Mutex
 		doneChanMap               map[string]chan struct{}
 		resourceID                string
-		resourceSpecificTaskqueue string
+		resourceSpecificTaskQueue string
 		sessionTokenBucket        *sessionTokenBucket
 	}
 
 	sessionCreationResponse struct {
-		Taskqueue  string
+		TaskQueue  string
 		HostName   string
 		ResourceID string
 	}
@@ -183,11 +183,11 @@ var (
 //	   ... // execute more activities using sessionCtx
 func CreateSession(ctx Context, sessionOptions *SessionOptions) (Context, error) {
 	options := getActivityOptions(ctx)
-	baseTaskqueue := options.TaskQueueName
-	if baseTaskqueue == "" {
-		baseTaskqueue = options.OriginalTaskQueueName
+	baseTaskQueue := options.TaskQueueName
+	if baseTaskQueue == "" {
+		baseTaskQueue = options.OriginalTaskQueueName
 	}
-	return createSession(ctx, getCreationTaskqueue(baseTaskqueue), sessionOptions, true)
+	return createSession(ctx, getCreationTaskQueue(baseTaskQueue), sessionOptions, true)
 }
 
 // RecreateSession recreate a session based on the sessionInfo passed in. Activities executed within
@@ -203,7 +203,7 @@ func RecreateSession(ctx Context, recreateToken []byte, sessionOptions *SessionO
 	if err != nil {
 		return nil, fmt.Errorf("failed to deserilalize recreate token: %v", err)
 	}
-	return createSession(ctx, recreateParams.Taskqueue, sessionOptions, true)
+	return createSession(ctx, recreateParams.TaskQueue, sessionOptions, true)
 }
 
 // CompleteSession completes a session. It releases worker resources, so other sessions can be created.
@@ -260,7 +260,7 @@ func GetSessionInfo(ctx Context) *SessionInfo {
 // RecreateSession() API.
 func (s *SessionInfo) GetRecreateToken() []byte {
 	params := recreateSessionParams{
-		Taskqueue: s.taskqueue,
+		TaskQueue: s.taskqueue,
 	}
 	return mustSerializeRecreateToken(&params)
 }
@@ -277,7 +277,7 @@ func setSessionInfo(ctx Context, sessionInfo *SessionInfo) Context {
 	return WithValue(ctx, sessionInfoContextKey, sessionInfo)
 }
 
-func createSession(ctx Context, creationTaskqueue string, options *SessionOptions, retryable bool) (Context, error) {
+func createSession(ctx Context, creationTaskQueue string, options *SessionOptions, retryable bool) (Context, error) {
 	logger := GetLogger(ctx)
 	logger.Debug("Start creating session")
 	if prevSessionInfo := getSessionInfo(ctx); prevSessionInfo != nil && prevSessionInfo.SessionState == SessionStateOpen {
@@ -306,7 +306,7 @@ func createSession(ctx Context, creationTaskqueue string, options *SessionOption
 		heartbeatTimeout = options.HeartbeatTimeout
 	}
 	ao := ActivityOptions{
-		TaskQueue:              creationTaskqueue,
+		TaskQueue:              creationTaskQueue,
 		ScheduleToStartTimeout: options.CreationTimeout,
 		StartToCloseTimeout:    options.ExecutionTimeout,
 		HeartbeatTimeout:       heartbeatTimeout,
@@ -348,7 +348,7 @@ func createSession(ctx Context, creationTaskqueue string, options *SessionOption
 		return nil, creationErr
 	}
 
-	sessionInfo.taskqueue = creationResponse.Taskqueue
+	sessionInfo.taskqueue = creationResponse.TaskQueue
 	sessionInfo.resourceID = creationResponse.ResourceID
 	sessionInfo.HostName = creationResponse.HostName
 	sessionInfo.sessionCancelFunc = sessionCancelFunc
@@ -380,11 +380,11 @@ func generateSessionID(ctx Context) (string, error) {
 	return sessionID, err
 }
 
-func getCreationTaskqueue(base string) string {
+func getCreationTaskQueue(base string) string {
 	return base + "__internal_session_creation"
 }
 
-func getResourceSpecificTaskqueue(resourceID string) string {
+func getResourceSpecificTaskQueue(resourceID string) string {
 	return resourceID + "@" + getHostName()
 }
 
@@ -521,7 +521,7 @@ func newSessionEnvironment(resourceID string, concurrentSessionExecutionSize int
 		Mutex:                     &sync.Mutex{},
 		doneChanMap:               make(map[string]chan struct{}),
 		resourceID:                resourceID,
-		resourceSpecificTaskqueue: getResourceSpecificTaskqueue(resourceID),
+		resourceSpecificTaskQueue: getResourceSpecificTaskQueue(resourceID),
 		sessionTokenBucket:        newSessionTokenBucket(concurrentSessionExecutionSize),
 	}
 }
@@ -552,7 +552,7 @@ func (env *sessionEnvironmentImpl) SignalCreationResponse(ctx context.Context, s
 
 func (env *sessionEnvironmentImpl) getCreationResponse() *sessionCreationResponse {
 	return &sessionCreationResponse{
-		Taskqueue:  env.resourceSpecificTaskqueue,
+		TaskQueue:  env.resourceSpecificTaskQueue,
 		ResourceID: env.resourceID,
 		HostName:   getHostName(),
 	}
@@ -568,8 +568,8 @@ func (env *sessionEnvironmentImpl) CompleteSession(sessionID string) {
 	}
 }
 
-func (env *sessionEnvironmentImpl) GetResourceSpecificTaskqueue() string {
-	return env.resourceSpecificTaskqueue
+func (env *sessionEnvironmentImpl) GetResourceSpecificTaskQueue() string {
+	return env.resourceSpecificTaskQueue
 }
 
 func (env *sessionEnvironmentImpl) GetTokenBucket() *sessionTokenBucket {

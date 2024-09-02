@@ -414,13 +414,13 @@ func newSessionWorker(service workflowservice.WorkflowServiceClient, params work
 	}
 	sessionEnvironment := newSessionEnvironment(params.SessionResourceID, params.MaxConcurrentSessionExecutionSize)
 
-	creationTaskqueue := getCreationTaskqueue(params.TaskQueue)
+	creationTaskQueue := getCreationTaskQueue(params.TaskQueue)
 	params.UserContext = context.WithValue(params.UserContext, sessionEnvironmentContextKey, sessionEnvironment)
-	params.TaskQueue = sessionEnvironment.GetResourceSpecificTaskqueue()
+	params.TaskQueue = sessionEnvironment.GetResourceSpecificTaskQueue()
 	activityWorker := newActivityWorker(service, params, overrides, env, nil)
 
 	params.MaxConcurrentActivityTaskQueuePollers = 1
-	params.TaskQueue = creationTaskqueue
+	params.TaskQueue = creationTaskQueue
 	if overrides == nil {
 		overrides = &workerOverrides{}
 	}

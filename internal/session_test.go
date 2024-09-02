@@ -438,8 +438,8 @@ func (s *SessionTestSuite) TestSessionTaskQueue() {
 
 	s.True(env.IsWorkflowCompleted())
 	s.NoError(env.GetWorkflowError())
-	s.Equal(getCreationTaskqueue(defaultTestTaskQueue), taskQueueUsed[0])
-	expectedTaskQueue := getResourceSpecificTaskqueue(resourceID)
+	s.Equal(getCreationTaskQueue(defaultTestTaskQueue), taskQueueUsed[0])
+	expectedTaskQueue := getResourceSpecificTaskQueue(resourceID)
 	for _, taskQueue := range taskQueueUsed[1:] {
 		s.Equal(expectedTaskQueue, taskQueue)
 	}
@@ -449,7 +449,7 @@ func (s *SessionTestSuite) TestSessionTaskQueue() {
 func (s *SessionTestSuite) TestSessionRecreationTaskQueue() {
 	numActivities := 3
 	resourceID := "testResourceID"
-	resourceSpecificTaskQueue := getResourceSpecificTaskqueue(resourceID)
+	resourceSpecificTaskQueue := getResourceSpecificTaskQueue(resourceID)
 	workflowFn := func(ctx Context) error {
 		ao := ActivityOptions{
 			ScheduleToStartTimeout: time.Minute,
@@ -564,7 +564,7 @@ func (s *SessionTestSuite) TestExecuteActivityInClosedSession() {
 }
 
 func (s *SessionTestSuite) TestSessionRecreateToken() {
-	testTaskqueue := "some random taskqueue"
+	testTaskQueue := "some random taskqueue"
 
 	sessionInfo := &SessionInfo{
 		SessionID:    "testSessionID",
@@ -574,7 +574,7 @@ func (s *SessionTestSuite) TestSessionRecreateToken() {
 	token := sessionInfo.GetRecreateToken()
 	params, err := deserializeRecreateToken(token)
 	s.NoError(err)
-	s.Equal(testTaskqueue, params.Taskqueue)
+	s.Equal(testTaskQueue, params.TaskQueue)
 }
 
 func (s *SessionTestSuite) TestInvalidRecreateToken() {
@@ -685,11 +685,11 @@ func (s *SessionTestSuite) TestActivityRetryWithinSession() {
 
 func (s *SessionTestSuite) createSessionWithoutRetry(ctx Context) (Context, error) {
 	options := getActivityOptions(ctx)
-	baseTaskqueue := options.TaskQueueName
-	if baseTaskqueue == "" {
-		baseTaskqueue = options.OriginalTaskQueueName
+	baseTaskQueue := options.TaskQueueName
+	if baseTaskQueue == "" {
+		baseTaskQueue = options.OriginalTaskQueueName
 	}
-	return createSession(ctx, getCreationTaskqueue(baseTaskqueue), s.sessionOptions, false)
+	return createSession(ctx, getCreationTaskQueue(baseTaskQueue), s.sessionOptions, false)
 }
 
 func testSessionActivity(_ context.Context, name string) (string, error) {
