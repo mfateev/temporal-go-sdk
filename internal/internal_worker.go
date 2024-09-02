@@ -82,6 +82,8 @@ const (
 
 	defaultMaxConcurrentSessionExecutionSize = 1000 // Large concurrent session execution size (1k)
 
+	defaultSessionReestablishingIntervalSeconds = 10
+
 	defaultDeadlockDetectionTimeout = time.Second // By default kill workflow tasks that are running more than 1 sec.
 	// Unlimited deadlock detection timeout is used when we want to allow workflow tasks to run indefinitely, such
 	// as during debugging.
@@ -203,8 +205,15 @@ type (
 		// the worker.
 		WorkerFatalErrorCallback func(error)
 
+		MaxConcurrentSessionExecutionSize int
+
 		// SessionResourceID is a unique identifier of the resource the session will consume
 		SessionResourceID string
+
+		// When set to false the SessionResourceID is UUID, so no session reestablishing is possible.
+		ReestablishSession bool
+
+		SessionReestablishingInterval time.Duration
 
 		ContextPropagators []ContextPropagator
 
@@ -399,15 +408,11 @@ func (ww *workflowWorker) Stop() {
 	ww.worker.Stop()
 }
 
-func newSessionWorker(service workflowservice.WorkflowServiceClient, params workerExecutionParameters, overrides *workerOverrides, env *registry, maxConcurrentSessionExecutionSize int) *sessionWorker {
+func newSessionWorker(service workflowservice.WorkflowServiceClient, params workerExecutionParameters, overrides *workerOverrides, env *registry) *sessionWorker {
 	if params.Identity == "" {
 		params.Identity = getWorkerIdentity(params.TaskQueue)
 	}
-	// For now resourceID is hidden from user so we will always create a unique one for each worker.
-	if params.SessionResourceID == "" {
-		params.SessionResourceID = uuid.New()
-	}
-	sessionEnvironment := newSessionEnvironment(params.SessionResourceID, maxConcurrentSessionExecutionSize)
+	sessionEnvironment := newSessionEnvironment(params.SessionResourceID, params.MaxConcurrentSessionExecutionSize)
 
 	creationTaskqueue := getCreationTaskqueue(params.TaskQueue)
 	params.UserContext = context.WithValue(params.UserContext, sessionEnvironmentContextKey, sessionEnvironment)
@@ -421,7 +426,7 @@ func newSessionWorker(service workflowservice.WorkflowServiceClient, params work
 	}
 	// Although we have session token bucket to limit session size across creation
 	// and recreation, we also limit it here for creation only
-	overrides.slotSupplier, _ = NewFixedSizeSlotSupplier(maxConcurrentSessionExecutionSize)
+	overrides.slotSupplier, _ = NewFixedSizeSlotSupplier(params.MaxConcurrentSessionExecutionSize)
 	creationWorker := newActivityWorker(service, params, overrides, env, sessionEnvironment.GetTokenBucket())
 
 	return &sessionWorker{
@@ -1673,6 +1678,8 @@ func NewAggregatedWorker(client *WorkflowClient, taskQueue string, options Worke
 		UserContextCancel:                     backgroundActivityContextCancel,
 		StickyScheduleToStartTimeout:          options.StickyScheduleToStartTimeout,
 		TaskQueueActivitiesPerSecond:          options.TaskQueueActivitiesPerSecond,
+		SessionReestablishingInterval:         options.SessionReestablishingInterval,
+		MaxConcurrentSessionExecutionSize:     options.MaxConcurrentSessionExecutionSize,
 		WorkflowPanicPolicy:                   options.WorkflowPanicPolicy,
 		DataConverter:                         client.dataConverter,
 		FailureConverter:                      client.failureConverter,
@@ -1694,7 +1701,12 @@ func NewAggregatedWorker(client *WorkflowClient, taskQueue string, options Worke
 	if options.Identity != "" {
 		workerParams.Identity = options.Identity
 	}
-
+	if options.SessionResourceID == "" {
+		workerParams.SessionResourceID = uuid.New()
+		workerParams.ReestablishSession = false
+	} else {
+		workerParams.ReestablishSession = true
+	}
 	ensureRequiredParams(&workerParams)
 	workerParams.Logger = log.With(workerParams.Logger,
 		tagNamespace, client.namespace,
@@ -1737,7 +1749,7 @@ func NewAggregatedWorker(client *WorkflowClient, taskQueue string, options Worke
 
 	var sessionWorker *sessionWorker
 	if options.EnableSessionWorker && !options.LocalActivityWorkerOnly {
-		sessionWorker = newSessionWorker(client.workflowService, workerParams, nil, registry, options.MaxConcurrentSessionExecutionSize)
+		sessionWorker = newSessionWorker(client.workflowService, workerParams, nil, registry)
 		registry.RegisterActivityWithOptions(sessionCreationActivity, RegisterActivityOptions{
 			Name: sessionCreationActivityName,
 		})
@@ -1901,6 +1913,9 @@ func setWorkerOptionsDefaults(options *WorkerOptions) {
 	}
 	if options.MaxConcurrentSessionExecutionSize == 0 {
 		options.MaxConcurrentSessionExecutionSize = defaultMaxConcurrentSessionExecutionSize
+	}
+	if options.SessionReestablishingInterval == 0 {
+		options.SessionReestablishingInterval = defaultSessionReestablishingIntervalSeconds * time.Second
 	}
 	if options.DeadlockDetectionTimeout == 0 {
 		if debugMode {
