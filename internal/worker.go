@@ -149,21 +149,23 @@ type (
 		// default: false
 		EnableSessionWorker bool
 
-		// Uncomment this option when we support automatic restablish failed sessions.
-		// Optional: The identifier of the resource consumed by sessions.
-		// It's the user's responsibility to ensure there's only one worker using this resourceID.
-		// For now, if user doesn't specify one, a new uuid will be used as the resourceID.
-		SessionResourceID string
-
 		// Optional: Sets the maximum number of concurrently running sessions the resource supports.
 		// default: 1000
 		MaxConcurrentSessionExecutionSize int
+
+		// Uncomment this option when we support automatic restablish failed sessions.
+		// Optional: The identifier of the resource consumed by sessions.
+		// It's the user's responsibility to ensure there's only one worker using this resourceID.
+		// For now, if user doesn't specify one, a new uuid will be used as the resourceID
+		// and session reestablishing is off.
+		SessionResourceID string
 
 		// Optional: Time to reestablish session after worker restart.
 		// During this interval the worker only accepts requests to reestablish sessions
 		// and does not listen to new session requests.
 		// After this interval the requests to reestablish session are still accepted,
 		// but they compete for slots with newly started sessions.
+		// Only used when SessionResourceID is specified.
 		// default: 10s
 		SessionReestablishingInterval time.Duration
 
