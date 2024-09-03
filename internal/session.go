@@ -61,10 +61,16 @@ type (
 	// HeartbeatTimeout: optional, default 20s
 	//     Specifies the heartbeat timeout. If heartbeat is not received by server
 	//     within the timeout, the session will be declared as failed
+	// ReestablishTimeout: optional, default 0s
+	//     Specifies the timeout to attempt to reestablish session in case of worker failure.
+	//     By default, the session is not reestablished.
+	//     The session is reestablished only if the worker set worker.Options.SessionResourceID to the same value
+	//     that was used to establish the original session.
 	SessionOptions struct {
-		ExecutionTimeout time.Duration
-		CreationTimeout  time.Duration
-		HeartbeatTimeout time.Duration
+		ExecutionTimeout   time.Duration
+		CreationTimeout    time.Duration
+		HeartbeatTimeout   time.Duration
+		ReestablishTimeout time.Duration
 	}
 
 	recreateSessionParams struct {
@@ -91,14 +97,16 @@ type (
 		*sync.Mutex
 		doneChanMap               map[string]chan struct{}
 		resourceID                string
+		canRecreate               bool
 		resourceSpecificTaskQueue string
 		sessionTokenBucket        *sessionTokenBucket
 	}
 
 	sessionCreationResponse struct {
-		TaskQueue  string
-		HostName   string
-		ResourceID string
+		TaskQueue   string
+		HostName    string
+		ResourceID  string
+		CanRecreate bool
 	}
 )
 
@@ -223,7 +231,7 @@ func CompleteSession(ctx Context) {
 	// this will cancel the ctx passed into this function
 	sessionInfo.sessionCancelFunc()
 
-	// then execute then completion activity using the completionCtx, which is not canceled.
+	// then execute the completion activity using the completionCtx, which is not canceled.
 	completionCtx := WithActivityOptions(sessionInfo.completionCtx, ActivityOptions{
 		ScheduleToStartTimeout: time.Second * 3,
 		StartToCloseTimeout:    time.Second * 3,
@@ -288,7 +296,7 @@ func createSession(ctx Context, creationTaskQueue string, options *SessionOption
 		return nil, err
 	}
 
-	taskqueueChan := GetSignalChannel(ctx, sessionID) // use sessionID as channel name
+	taskQueueChan := GetSignalChannel(ctx, sessionID) // use sessionID as channel name
 	// Retry is only needed when creating new session and the error returned is
 	// NewApplicationError(errTooManySessionsMsg). Therefore we make sure to
 	// disable retrying for start-to-close and heartbeat timeouts which can occur
@@ -333,7 +341,7 @@ func createSession(ctx Context, creationTaskQueue string, options *SessionOption
 	var creationErr error
 	var creationResponse sessionCreationResponse
 	s := NewSelector(creationCtx)
-	s.AddReceive(taskqueueChan, func(c ReceiveChannel, more bool) {
+	s.AddReceive(taskQueueChan, func(c ReceiveChannel, more bool) {
 		c.Receive(creationCtx, &creationResponse)
 	})
 	s.AddFuture(creationFuture, func(f Future) {
@@ -516,11 +524,12 @@ func (t *sessionTokenBucket) getToken() bool {
 	return true
 }
 
-func newSessionEnvironment(resourceID string, concurrentSessionExecutionSize int) sessionEnvironment {
+func newSessionEnvironment(resourceID string, canRecreate bool, concurrentSessionExecutionSize int) sessionEnvironment {
 	return &sessionEnvironmentImpl{
 		Mutex:                     &sync.Mutex{},
 		doneChanMap:               make(map[string]chan struct{}),
 		resourceID:                resourceID,
+		canRecreate:               canRecreate,
 		resourceSpecificTaskQueue: getResourceSpecificTaskQueue(resourceID),
 		sessionTokenBucket:        newSessionTokenBucket(concurrentSessionExecutionSize),
 	}
@@ -552,9 +561,10 @@ func (env *sessionEnvironmentImpl) SignalCreationResponse(ctx context.Context, s
 
 func (env *sessionEnvironmentImpl) getCreationResponse() *sessionCreationResponse {
 	return &sessionCreationResponse{
-		TaskQueue:  env.resourceSpecificTaskQueue,
-		ResourceID: env.resourceID,
-		HostName:   getHostName(),
+		TaskQueue:   env.resourceSpecificTaskQueue,
+		ResourceID:  env.resourceID,
+		HostName:    getHostName(),
+		CanRecreate: env.canRecreate,
 	}
 }
 

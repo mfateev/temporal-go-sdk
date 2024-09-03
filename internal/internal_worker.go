@@ -416,7 +416,7 @@ func newSessionWorker(service workflowservice.WorkflowServiceClient, params work
 	if params.Identity == "" {
 		params.Identity = getWorkerIdentity(params.TaskQueue)
 	}
-	sessionEnvironment := newSessionEnvironment(params.SessionResourceID, params.MaxConcurrentSessionExecutionSize)
+	sessionEnvironment := newSessionEnvironment(params.SessionResourceID, params.ReestablishSession, params.MaxConcurrentSessionExecutionSize)
 
 	creationTaskQueue := getCreationTaskQueue(params.TaskQueue)
 	params.UserContext = context.WithValue(params.UserContext, sessionEnvironmentContextKey, sessionEnvironment)

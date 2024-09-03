@@ -2803,7 +2803,7 @@ func newTestSessionEnvironment(testWorkflowEnvironment *testWorkflowEnvironmentI
 	}
 
 	return &testSessionEnvironmentImpl{
-		sessionEnvironmentImpl:  newSessionEnvironment(resourceID, concurrentSessionExecutionSize).(*sessionEnvironmentImpl),
+		sessionEnvironmentImpl:  newSessionEnvironment(resourceID, params.ReestablishSession, concurrentSessionExecutionSize).(*sessionEnvironmentImpl),
 		testWorkflowEnvironment: testWorkflowEnvironment,
 	}
 }
