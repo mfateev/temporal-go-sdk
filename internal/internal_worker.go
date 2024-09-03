@@ -118,11 +118,15 @@ type (
 	}
 
 	// sessionWorker wraps the code for hosting session creation, completion and
-	// activities within a session. The creationWorker polls from a global taskqueue,
-	// while the activityWorker polls from a resource specific taskqueue.
+	// activities within a session.
 	sessionWorker struct {
+		ReestablishSession            bool
+		SessionReestablishingInterval time.Duration
+		// creationWorker polls from a global task queue.
 		creationWorker *activityWorker
+		// activityWorker polls from a resource specific task queue.
 		activityWorker *activityWorker
+		logger         log.Logger
 	}
 
 	// Worker overrides.
@@ -430,21 +434,34 @@ func newSessionWorker(service workflowservice.WorkflowServiceClient, params work
 	creationWorker := newActivityWorker(service, params, overrides, env, sessionEnvironment.GetTokenBucket())
 
 	return &sessionWorker{
-		creationWorker: creationWorker,
-		activityWorker: activityWorker,
+		ReestablishSession:            params.ReestablishSession,
+		SessionReestablishingInterval: params.SessionReestablishingInterval,
+		creationWorker:                creationWorker,
+		activityWorker:                activityWorker,
+		logger:                        params.Logger,
 	}
 }
 
 func (sw *sessionWorker) Start() error {
-	err := sw.creationWorker.Start()
+	err := sw.activityWorker.Start()
 	if err != nil {
 		return err
 	}
-
-	err = sw.activityWorker.Start()
-	if err != nil {
-		sw.creationWorker.Stop()
-		return err
+	if sw.ReestablishSession {
+		// Only accepts creation requests on the resource specific task queue for SessionReestablishingInterval.
+		time.AfterFunc(sw.SessionReestablishingInterval, func() {
+			// The only error Start returns is due to invalid namespace
+			// The activityWorker.Start should catch it.
+			err2 := sw.creationWorker.Start()
+			if err2 != nil {
+				sw.logger.Error("Failure starting session creation worker", err2)
+			}
+		})
+	} else {
+		err = sw.creationWorker.Start()
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
