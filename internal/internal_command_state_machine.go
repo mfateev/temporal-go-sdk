@@ -79,8 +79,9 @@ type (
 
 	activityCommandStateMachine struct {
 		*commandStateMachineBase
-		scheduleID int64
-		attributes *commandpb.ScheduleActivityTaskCommandAttributes
+		scheduleID    int64
+		attributes    *commandpb.ScheduleActivityTaskCommandAttributes
+		startMetadata *sdk.UserMetadata
 	}
 
 	cancelActivityStateMachine struct {
@@ -152,7 +153,8 @@ type (
 		attributes       *commandpb.ScheduleNexusOperationCommandAttributes
 		// Instead of tracking cancelation as a state, we track it as a separate dimension with the request-cancel state
 		// machine.
-		cancelation *requestCancelNexusOperationStateMachine
+		cancelation   *requestCancelNexusOperationStateMachine
+		startMetadata *sdk.UserMetadata
 	}
 
 	// requestCancelNexusOperationStateMachine is the state machine for the RequestCancelNexusOperation command.
@@ -348,12 +350,14 @@ func (h *commandsHelper) newCommandStateMachineBase(commandType commandType, id 
 func (h *commandsHelper) newActivityCommandStateMachine(
 	scheduleID int64,
 	attributes *commandpb.ScheduleActivityTaskCommandAttributes,
+	startMetadata *sdk.UserMetadata,
 ) *activityCommandStateMachine {
 	base := h.newCommandStateMachineBase(commandTypeActivity, attributes.GetActivityId())
 	return &activityCommandStateMachine{
 		commandStateMachineBase: base,
 		scheduleID:              scheduleID,
 		attributes:              attributes,
+		startMetadata:           startMetadata,
 	}
 }
 
@@ -368,6 +372,7 @@ func (h *commandsHelper) newCancelActivityStateMachine(attributes *commandpb.Req
 func (h *commandsHelper) newNexusOperationStateMachine(
 	seq int64,
 	attributes *commandpb.ScheduleNexusOperationCommandAttributes,
+	startMetadata *sdk.UserMetadata,
 ) *nexusOperationStateMachine {
 	base := h.newCommandStateMachineBase(commandTypeNexusOperation, strconv.FormatInt(seq, 10))
 	sm := &nexusOperationStateMachine{
@@ -375,6 +380,7 @@ func (h *commandsHelper) newNexusOperationStateMachine(
 		attributes:              attributes,
 		seq:                     seq,
 		// scheduledEventID will be assigned by the server when the corresponding event comes in.
+		startMetadata: startMetadata,
 	}
 	h.nexusOperationsWithoutScheduledID.PushBack(sm)
 	return sm
@@ -618,6 +624,7 @@ func (d *activityCommandStateMachine) getCommand() *commandpb.Command {
 	case commandStateCreated, commandStateCanceledBeforeSent:
 		command := createNewCommand(enumspb.COMMAND_TYPE_SCHEDULE_ACTIVITY_TASK)
 		command.Attributes = &commandpb.Command_ScheduleActivityTaskCommandAttributes{ScheduleActivityTaskCommandAttributes: d.attributes}
+		command.UserMetadata = d.startMetadata
 		return command
 	default:
 		return nil
@@ -937,7 +944,8 @@ func (sm *nexusOperationStateMachine) getCommand() *commandpb.Command {
 	if sm.state == commandStateCreated && sm.cancelation == nil {
 		// Only create the command in this state unlike other machines that also create it if canceled before sent.
 		return &commandpb.Command{
-			CommandType: enumspb.COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION,
+			CommandType:  enumspb.COMMAND_TYPE_SCHEDULE_NEXUS_OPERATION,
+			UserMetadata: sm.startMetadata,
 			Attributes: &commandpb.Command_ScheduleNexusOperationCommandAttributes{
 				ScheduleNexusOperationCommandAttributes: sm.attributes,
 			},
@@ -1070,8 +1078,9 @@ func (h *commandsHelper) incrementNextCommandEventIDIfVersionMarker() {
 func (h *commandsHelper) getCommand(id commandID) commandStateMachine {
 	command, ok := h.commands[id]
 	if !ok {
-		panicMsg := fmt.Sprintf("[TMPRL1100] unknown command %v, possible causes are nondeterministic workflow definition code"+
-			" or incompatible change in the workflow definition", id)
+		panicMsg := fmt.Sprintf(
+			"[TMPRL1100] During replay, a matching %v command was expected in history event position %s. However, the replayed code did not produce that. "+
+				"Possible causes are nondeterministic workflow definition code, or an incompatible change in the workflow definition.", id.commandType, id.id)
 		panicIllegalState(panicMsg)
 	}
 	return command.Value.(commandStateMachine)
@@ -1118,9 +1127,10 @@ func (h *commandsHelper) moveCommandToBack(command commandStateMachine) {
 func (h *commandsHelper) scheduleActivityTask(
 	scheduleID int64,
 	attributes *commandpb.ScheduleActivityTaskCommandAttributes,
+	metadata *sdk.UserMetadata,
 ) commandStateMachine {
 	h.scheduledEventIDToActivityID[scheduleID] = attributes.GetActivityId()
-	command := h.newActivityCommandStateMachine(scheduleID, attributes)
+	command := h.newActivityCommandStateMachine(scheduleID, attributes, metadata)
 	h.addCommand(command)
 	return command
 }
@@ -1195,8 +1205,9 @@ func (h *commandsHelper) getActivityAndScheduledEventIDs(event *historypb.Histor
 func (h *commandsHelper) scheduleNexusOperation(
 	seq int64,
 	attributes *commandpb.ScheduleNexusOperationCommandAttributes,
+	startMetadata *sdk.UserMetadata,
 ) *nexusOperationStateMachine {
-	command := h.newNexusOperationStateMachine(seq, attributes)
+	command := h.newNexusOperationStateMachine(seq, attributes, startMetadata)
 	h.addCommand(command)
 	return command
 }

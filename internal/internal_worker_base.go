@@ -99,7 +99,7 @@ type (
 		RequestCancelChildWorkflow(namespace, workflowID string)
 		RequestCancelExternalWorkflow(namespace, workflowID, runID string, callback ResultHandler)
 		ExecuteChildWorkflow(params ExecuteWorkflowParams, callback ResultHandler, startedHandler func(r WorkflowExecution, e error))
-		ExecuteNexusOperation(params executeNexusOperationParams, callback func(*commonpb.Payload, error), startedHandler func(opID string, e error)) int64
+		ExecuteNexusOperation(params executeNexusOperationParams, callback func(*commonpb.Payload, error), startedHandler func(token string, e error)) int64
 		RequestCancelNexusOperation(seq int64)
 		GetLogger() log.Logger
 		GetMetricsHandler() metrics.Handler
@@ -145,6 +145,8 @@ type (
 		DrainUnhandledUpdates() bool
 		// TryUse returns true if this flag may currently be used.
 		TryUse(flag sdkFlag) bool
+		// GetFlag returns if the flag is currently used.
+		GetFlag(flag sdkFlag) bool
 	}
 
 	// WorkflowDefinitionFactory factory for creating WorkflowDefinition instances.
@@ -229,6 +231,13 @@ type (
 		permit *SlotPermit
 	}
 )
+
+func (h ResultHandler) wrap(callback ResultHandler) ResultHandler {
+	return func(result *commonpb.Payloads, err error) {
+		callback(result, err)
+		h(result, err)
+	}
+}
 
 func (t *polledTask) getTask() taskForWorker {
 	return t.task
@@ -579,6 +588,11 @@ func (bw *baseWorker) Stop() {
 	}
 	close(bw.stopCh)
 	bw.limiterContextCancel()
+
+	err := bw.options.taskWorker.Cleanup()
+	if err != nil {
+		bw.logger.Error("Couldn't cleanup task worker", tagError, err)
+	}
 
 	if success := awaitWaitGroup(&bw.stopWG, bw.options.stopTimeout); !success {
 		traceLog(func() {

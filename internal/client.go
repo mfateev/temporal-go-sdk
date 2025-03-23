@@ -27,12 +27,10 @@ package internal
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
 
-	"go.temporal.io/api/cloud/cloudservice/v1"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	"go.temporal.io/api/operatorservice/v1"
@@ -48,14 +46,20 @@ import (
 
 const (
 	// DefaultNamespace is the namespace name which is used if not passed with options.
+	//
+	// Exposed as: [go.temporal.io/sdk/client.DefaultNamespace]
 	DefaultNamespace = "default"
 
 	// QueryTypeStackTrace is the build in query type for Client.QueryWorkflow() call. Use this query type to get the call
 	// stack of the workflow. The result will be a string encoded in the EncodedValue.
+	//
+	// Exposed as: [go.temporal.io/sdk/client.QueryTypeStackTrace]
 	QueryTypeStackTrace string = "__stack_trace"
 
 	// QueryTypeOpenSessions is the build in query type for Client.QueryWorkflow() call. Use this query type to get all open
 	// sessions in the workflow. The result will be a list of SessionInfo encoded in the EncodedValue.
+	//
+	// Exposed as: [go.temporal.io/sdk/client.QueryTypeOpenSessions]
 	QueryTypeOpenSessions string = "__open_sessions"
 
 	// QueryTypeWorkflowMetadata is the query name for the workflow metadata.
@@ -77,6 +81,7 @@ type (
 		//  - serviceerror.InvalidArgument
 		//  - serviceerror.Internal
 		//  - serviceerror.Unavailable
+		//  - serviceerror.WorkflowExecutionAlreadyStarted, when WorkflowExecutionErrorWhenAlreadyStarted is specified
 		//
 		// The current timeout resolution implementation is in seconds and uses math.Ceil(d.Seconds()) as the duration. But is
 		// subjected to change in the future.
@@ -87,18 +92,20 @@ type (
 		//  - Get(ctx context.Context, valuePtr interface{}) error: which will fill the workflow
 		//    execution result to valuePtr, if workflow execution is a success, or return corresponding
 		//    error. This is a blocking API.
-		// NOTE: if the started workflow return ContinueAsNewError during the workflow execution, the
-		// return result of GetRunID() will be the started workflow run ID, not the new run ID caused by ContinueAsNewError,
-		// however, Get(ctx context.Context, valuePtr interface{}) will return result from the run which did not return ContinueAsNewError.
+		//
+		// NOTE: If the started workflow returns ContinueAsNewError during the workflow execution, the
+		// returned result of GetRunID() will be the started workflow run ID, not the new run ID caused by ContinueAsNewError.
+		// However, Get(ctx context.Context, valuePtr interface{}) will return result from the run which did not return ContinueAsNewError.
 		// Say ExecuteWorkflow started a workflow, in its first run, has run ID "run ID 1", and returned ContinueAsNewError,
 		// the second run has run ID "run ID 2" and return some result other than ContinueAsNewError:
 		// GetRunID() will always return "run ID 1" and  Get(ctx context.Context, valuePtr interface{}) will return the result of second run.
+		//
 		// NOTE: DO NOT USE THIS API INSIDE A WORKFLOW, USE workflow.ExecuteChildWorkflow instead
 		ExecuteWorkflow(ctx context.Context, options StartWorkflowOptions, workflow interface{}, args ...interface{}) (WorkflowRun, error)
 
 		// GetWorkflow retrieves a workflow execution and return a WorkflowRun instance
-		// - workflow ID of the workflow.
-		// - runID can be default(empty string). if empty string then it will pick the last running execution of that workflow ID.
+		//  - workflow ID of the workflow.
+		//  - runID can be default(empty string). if empty string then it will pick the last running execution of that workflow ID.
 		//
 		// WorkflowRun has three methods:
 		//  - GetID() string: which return workflow ID (which is same as StartWorkflowOptions.ID if provided)
@@ -106,15 +113,16 @@ type (
 		//  - Get(ctx context.Context, valuePtr interface{}) error: which will fill the workflow
 		//    execution result to valuePtr, if workflow execution is a success, or return corresponding
 		//    error. This is a blocking API.
+		//
 		// NOTE: if the retrieved workflow returned ContinueAsNewError during the workflow execution, the
 		// return result of GetRunID() will be the retrieved workflow run ID, not the new run ID caused by ContinueAsNewError,
 		// however, Get(ctx context.Context, valuePtr interface{}) will return result from the run which did not return ContinueAsNewError.
 		GetWorkflow(ctx context.Context, workflowID string, runID string) WorkflowRun
 
 		// SignalWorkflow sends a signals to a workflow in execution
-		// - workflow ID of the workflow.
-		// - runID can be default(empty string). if empty string then it will pick the running execution of that workflow ID.
-		// - signalName name to identify the signal.
+		//  - workflow ID of the workflow.
+		//  - runID can be default(empty string). if empty string then it will pick the running execution of that workflow ID.
+		//  - signalName name to identify the signal.
 		// The errors it can return:
 		//  - serviceerror.NotFound
 		//  - serviceerror.Internal
@@ -123,9 +131,9 @@ type (
 
 		// SignalWithStartWorkflow sends a signal to a running workflow.
 		// If the workflow is not running or not found, it starts the workflow and then sends the signal in transaction.
-		// - workflowID, signalName, signalArg are same as SignalWorkflow's parameters
-		// - options, workflow, workflowArgs are same as StartWorkflow's parameters
-		// - the workflowID parameter is used instead of options.ID. If the latter is present, it must match the workflowID.
+		//  - workflowID, signalName, signalArg are same as SignalWorkflow's parameters
+		//  - options, workflow, workflowArgs are same as StartWorkflow's parameters
+		//  - the workflowID parameter is used instead of options.ID. If the latter is present, it must match the workflowID.
 		// Note: options.WorkflowIDReusePolicy is default to AllowDuplicate.
 		// The errors it can return:
 		//  - serviceerror.NotFound
@@ -135,9 +143,14 @@ type (
 		SignalWithStartWorkflow(ctx context.Context, workflowID string, signalName string, signalArg interface{},
 			options StartWorkflowOptions, workflow interface{}, workflowArgs ...interface{}) (WorkflowRun, error)
 
+		// NewWithStartWorkflowOperation returns a WithStartWorkflowOperation for use in UpdateWithStartWorkflow.
+		//
+		// NOTE: Experimental
+		NewWithStartWorkflowOperation(options StartWorkflowOptions, workflow interface{}, args ...interface{}) WithStartWorkflowOperation
+
 		// CancelWorkflow cancels a workflow in execution
-		// - workflow ID of the workflow.
-		// - runID can be default(empty string). if empty string then it will pick the running execution of that workflow ID.
+		//  - workflow ID of the workflow.
+		//  - runID can be default(empty string). if empty string then it will pick the running execution of that workflow ID.
 		// The errors it can return:
 		//  - serviceerror.NotFound
 		//  - serviceerror.InvalidArgument
@@ -147,8 +160,8 @@ type (
 
 		// TerminateWorkflow terminates a workflow execution.
 		// workflowID is required, other parameters are optional.
-		// - workflow ID of the workflow.
-		// - runID can be default(empty string). if empty string then it will pick the running execution of that workflow ID.
+		//  - workflow ID of the workflow.
+		//  - runID can be default(empty string). if empty string then it will pick the running execution of that workflow ID.
 		// The errors it can return:
 		//  - serviceerror.NotFound
 		//  - serviceerror.InvalidArgument
@@ -157,12 +170,12 @@ type (
 		TerminateWorkflow(ctx context.Context, workflowID string, runID string, reason string, details ...interface{}) error
 
 		// GetWorkflowHistory gets history events of a particular workflow
-		// - workflow ID of the workflow.
-		// - runID can be default(empty string). if empty string then it will pick the last running execution of that workflow ID.
-		// - whether use long poll for tracking new events: when the workflow is running, there can be new events generated during iteration
+		//  - workflow ID of the workflow.
+		//  - runID can be default(empty string). if empty string then it will pick the last running execution of that workflow ID.
+		//  - whether use long poll for tracking new events: when the workflow is running, there can be new events generated during iteration
 		//    of HistoryEventIterator, if isLongPoll == true, then iterator will do long poll, tracking new history event, i.e. the iteration
 		//   will not be finished until workflow is finished; if isLongPoll == false, then iterator will only return current history events.
-		// - whether return all history events or just the last event, which contains the workflow execution end result
+		//  - whether return all history events or just the last event, which contains the workflow execution end result
 		// Example:-
 		//  To iterate all events,
 		//    iter := GetWorkflowHistory(ctx, workflowID, runID, isLongPoll, filterType)
@@ -275,7 +288,9 @@ type (
 		//  - serviceerror.Internal
 		//  - serviceerror.Unavailable
 		// [Visibility]: https://docs.temporal.io/visibility
-		ScanWorkflow(ctx context.Context, request *workflowservice.ScanWorkflowExecutionsRequest) (*workflowservice.ScanWorkflowExecutionsResponse, error)
+		//
+		// Deprecated: Use ListWorkflow instead.
+		ScanWorkflow(ctx context.Context, request *workflowservice.ScanWorkflowExecutionsRequest) (*workflowservice.ScanWorkflowExecutionsResponse, error) //lint:ignore SA1019 the server API was deprecated.
 
 		// CountWorkflow gets number of workflow executions based on query. The query is basically the SQL WHERE clause
 		// (see ListWorkflow for query examples).
@@ -302,10 +317,10 @@ type (
 		// to handle custom query types.
 		// See comments at workflow.SetQueryHandler(ctx Context, queryType string, handler interface{}) for more details
 		// on how to setup query handler within the target workflow.
-		// - workflowID is required.
-		// - runID can be default(empty string). if empty string then it will pick the running execution of that workflow ID.
-		// - queryType is the type of the query.
-		// - args... are the optional query parameters.
+		//  - workflowID is required.
+		//  - runID can be default(empty string). if empty string then it will pick the running execution of that workflow ID.
+		//  - queryType is the type of the query.
+		//  - args... are the optional query parameters.
 		// The errors it can return:
 		//  - serviceerror.InvalidArgument
 		//  - serviceerror.Internal
@@ -331,6 +346,13 @@ type (
 		//  - serviceerror.Unavailable
 		//  - serviceerror.NotFound
 		DescribeWorkflowExecution(ctx context.Context, workflowID, runID string) (*workflowservice.DescribeWorkflowExecutionResponse, error)
+
+		// UpdateWorkflowExecutionOptions partially overrides the [WorkflowExecutionOptions] of an existing workflow execution
+		// and returns the new [WorkflowExecutionOptions] after applying the changes.
+		// It is intended for building tools that can selectively apply ad-hoc workflow configuration changes.
+		//
+		// NOTE: Experimental
+		UpdateWorkflowExecutionOptions(ctx context.Context, options UpdateWorkflowExecutionOptionsRequest) (WorkflowExecutionOptions, error)
 
 		// DescribeTaskQueue returns information about the target taskqueue, right now this API returns the
 		// pollers which polled this taskqueue in last few minutes.
@@ -391,13 +413,22 @@ type (
 		// update is requested (e.g. if the required workflow ID field is
 		// missing from the UpdateWorkflowOptions) are returned
 		// directly from this function call.
-		// NOTE: Experimental
 		UpdateWorkflow(ctx context.Context, options UpdateWorkflowOptions) (WorkflowUpdateHandle, error)
+
+		// UpdateWithStartWorkflow issues an update-with-start request. A
+		// WorkflowIDConflictPolicy must be set. If the specified workflow is
+		// not running, then a new workflow execution is started and the update
+		// is sent in the first workflow task. Alternatively if the specified
+		// workflow is running then, if the WorkflowIDConflictPolicy is
+		// USE_EXISTING, the update is issued against the specified workflow,
+		// and if the WorkflowIDConflictPolicy is FAIL, an error is returned.
+		//
+		// NOTE: Experimental
+		UpdateWithStartWorkflow(ctx context.Context, options UpdateWithStartWorkflowOptions) (WorkflowUpdateHandle, error)
 
 		// GetWorkflowUpdateHandle creates a handle to the referenced update
 		// which can be polled for an outcome. Note that runID is optional and
 		// if not specified the most recent runID will be used.
-		// NOTE: Experimental
 		GetWorkflowUpdateHandle(GetWorkflowUpdateHandleOptions) WorkflowUpdateHandle
 
 		// WorkflowService provides access to the underlying gRPC service. This should only be used for advanced use cases
@@ -411,13 +442,24 @@ type (
 		// Schedule creates a new shedule client with the same gRPC connection as this client.
 		ScheduleClient() ScheduleClient
 
+		// DeploymentClient creates a new deployment client with the same gRPC connection as this client.
+		//
+		// Deprecated: Use [WorkerDeploymentClient]
+		DeploymentClient() DeploymentClient
+
+		// WorkerDeploymentClient creates a new worker deployment client with the same gRPC connection as this client.
+		WorkerDeploymentClient() WorkerDeploymentClient
+
 		// Close client and clean up underlying resources.
 		Close()
 	}
 
 	// ClientOptions are optional parameters for Client creation.
+	//
+	// Exposed as: [go.temporal.io/sdk/client.Options]
 	ClientOptions struct {
 		// Optional: To set the host:port for this client to connect to.
+		//
 		// default: localhost:7233
 		//
 		// This is a gRPC address and therefore can also support a special-formatted address of "<resolver>:///<value>" that
@@ -437,6 +479,7 @@ type (
 		HostPort string
 
 		// Optional: To set the namespace name for this client to work with.
+		//
 		// default: default
 		Namespace string
 
@@ -444,31 +487,38 @@ type (
 		Credentials Credentials
 
 		// Optional: Logger framework can use to log.
+		//
 		// default: default logger provided.
 		Logger log.Logger
 
 		// Optional: Metrics handler for reporting metrics.
+		//
 		// default: no metrics.
 		MetricsHandler metrics.Handler
 
 		// Optional: Sets an identify that can be used to track this host for debugging.
+		//
 		// default: default identity that include hostname, groupName and process ID.
 		Identity string
 
 		// Optional: Sets DataConverter to customize serialization/deserialization of arguments in Temporal
+		//
 		// default: defaultDataConverter, an combination of google protobuf converter, gogo protobuf converter and json converter
 		DataConverter converter.DataConverter
 
 		// Optional: Sets FailureConverter to customize serialization/deserialization of errors.
+		//
 		// default: temporal.DefaultFailureConverter, does not encode any fields of the error. Use temporal.NewDefaultFailureConverter
 		// options to configure or create a custom converter.
 		FailureConverter converter.FailureConverter
 
 		// Optional: Sets ContextPropagators that allows users to control the context information passed through a workflow
+		//
 		// default: nil
 		ContextPropagators []ContextPropagator
 
 		// Optional: Sets options for server connection that allow users to control features of connections such as TLS settings.
+		//
 		// default: no extra options
 		ConnectionOptions ConnectionOptions
 
@@ -494,48 +544,6 @@ type (
 		DisableErrorCodeMetricTags bool
 	}
 
-	CloudOperationsClient interface {
-		CloudService() cloudservice.CloudServiceClient
-		Close()
-	}
-
-	// CloudOperationsClientOptions are parameters for CloudOperationsClient creation.
-	//
-	// WARNING: Cloud operations client is currently experimental.
-	CloudOperationsClientOptions struct {
-		// Optional: The credentials for this client. This is essentially required.
-		// See [go.temporal.io/sdk/client.NewAPIKeyStaticCredentials],
-		// [go.temporal.io/sdk/client.NewAPIKeyDynamicCredentials], and
-		// [go.temporal.io/sdk/client.NewMTLSCredentials].
-		// Default: No credentials.
-		Credentials Credentials
-
-		// Optional: Version header for safer mutations. May or may not be required
-		// depending on cloud settings.
-		// Default: No header.
-		Version string
-
-		// Optional: Advanced server connection options such as TLS settings. Not
-		// usually needed.
-		ConnectionOptions ConnectionOptions
-
-		// Optional: Logger framework can use to log.
-		// Default: Default logger provided.
-		Logger log.Logger
-
-		// Optional: Metrics handler for reporting metrics.
-		// Default: No metrics
-		MetricsHandler metrics.Handler
-
-		// Optional: Overrides the specific host to connect to. Not usually needed.
-		// Default: saas-api.tmprl.cloud:443
-		HostPort string
-
-		// Optional: Disable TLS.
-		// Default: false (i.e. TLS enabled)
-		DisableTLS bool
-	}
-
 	// HeadersProvider returns a map of gRPC headers that should be used on every request.
 	HeadersProvider interface {
 		GetHeaders(ctx context.Context) (map[string]string, error)
@@ -548,6 +556,8 @@ type (
 	}
 
 	// ConnectionOptions is provided by SDK consumers to control optional connection params.
+	//
+	// Exposed as: [go.temporal.io/sdk/client.ConnectionOptions]
 	ConnectionOptions struct {
 		// TLS configures connection level security credentials.
 		TLS *tls.Config
@@ -562,12 +572,14 @@ type (
 		// After a duration of this time if the client doesn't see any activity it
 		// pings the server to see if the transport is still alive.
 		// If set below 10s, a minimum value of 10s will be used instead.
+		//
 		// default: 30s
 		KeepAliveTime time.Duration
 
 		// After having pinged for keepalive check, the client waits for a duration
 		// of Timeout and if no activity is seen even after that the connection is
 		// closed.
+		//
 		// default: 15s
 		KeepAliveTimeout time.Duration
 
@@ -578,6 +590,7 @@ type (
 		// if true, when there are no active RPCs, Time and Timeout will be ignored and no
 		// keepalive pings will be sent.
 		// If false, client sends keepalive pings even with no active RPCs
+		//
 		// default: false
 		DisableKeepAlivePermitWithoutStream bool
 
@@ -608,14 +621,18 @@ type (
 	// StartWorkflowOptions configuration parameters for starting a workflow execution.
 	// The current timeout resolution implementation is in seconds and uses math.Ceil(d.Seconds()) as the duration. But is
 	// subjected to change in the future.
+	//
+	// Exposed as: [go.temporal.io/sdk/client.StartWorkflowOptions]
 	StartWorkflowOptions struct {
 		// ID - The business identifier of the workflow execution.
+		//
 		// Optional: defaulted to a uuid.
 		ID string
 
 		// TaskQueue - The workflow tasks of the workflow are scheduled on the queue with this name.
 		// This is also the name of the activity task queue on which activities are scheduled.
 		// The workflow author can choose to override this using activity options.
+		//
 		// Mandatory: No default.
 		TaskQueue string
 
@@ -623,47 +640,49 @@ type (
 		// It includes retries and continue as new. Use WorkflowRunTimeout to limit execution time
 		// of a single workflow run.
 		// The resolution is seconds.
+		//
 		// Optional: defaulted to unlimited.
 		WorkflowExecutionTimeout time.Duration
 
 		// WorkflowRunTimeout - The timeout for duration of a single workflow run.
 		// The resolution is seconds.
+		//
 		// Optional: defaulted to WorkflowExecutionTimeout.
 		WorkflowRunTimeout time.Duration
 
 		// WorkflowTaskTimeout - The timeout for processing workflow task from the time the worker
 		// pulled this task. If a workflow task is lost, it is retried after this timeout.
 		// The resolution is seconds.
+		//
 		// Optional: defaulted to 10 secs.
 		WorkflowTaskTimeout time.Duration
 
 		// WorkflowIDReusePolicy - Specifies server behavior if a *completed* workflow with the same id exists.
 		// This can be useful for dedupe logic if set to RejectDuplicate
+		//
+		// NOTE: WorkflowExecutionErrorWhenAlreadyStarted will affect if Client.ExecuteWorkflow returns an error
+		// when a re-run would be disallowed. See its docstring for more information.
+		//
 		// Optional: defaulted to AllowDuplicate.
 		WorkflowIDReusePolicy enumspb.WorkflowIdReusePolicy
 
 		// WorkflowIDConflictPolicy - Specifies server behavior if a *running* workflow with the same id exists.
 		// This cannot be set if WorkflowIDReusePolicy is set to TerminateIfRunning.
-		// Optional: defaulted to Fail.
+		//
+		// NOTE: WorkflowExecutionErrorWhenAlreadyStarted will affect if Client.ExecuteWorkflow returns an error
+		// when a re-run would be disallowed. See its docstring for more information.
+		//
+		// Optional: defaulted to Fail - required when used in WithStartWorkflowOperation.
 		WorkflowIDConflictPolicy enumspb.WorkflowIdConflictPolicy
-
-		// WithStartOperation - Operation to execute with Workflow Start.
-		// For example, see NewUpdateWithStartWorkflowOperation to perform Update-with-Start. Note that if the workflow is
-		// already running and WorkflowIDConflictPolicy is set to UseExisting, the start is skipped and only the
-		// operation is executed. If instead the policy is set to Fail (the default), nothing is executed and
-		// an error will be returned (i.e. the option WorkflowExecutionErrorWhenAlreadyStarted is ignored).
-		// This option will be ignored when used with Client.SignalWithStartWorkflow.
-		//
-		// Optional: defaults to nil.
-		//
-		// NOTE: Experimental
-		WithStartOperation WithStartWorkflowOperation
 
 		// When WorkflowExecutionErrorWhenAlreadyStarted is true, Client.ExecuteWorkflow will return an error if the
 		// workflow id has already been used and WorkflowIDReusePolicy or WorkflowIDConflictPolicy would
 		// disallow a re-run. If it is set to false, rather than erroring a WorkflowRun instance representing
-		// the current or last run will be returned. However, when WithStartOperation is set, this field is ignored and
-		// the WorkflowIDConflictPolicy UseExisting must be used instead to prevent erroring.
+		// the current or last run will be returned. However, this field is ignored in the following cases:
+		// - in WithStartWorkflowOperation;
+		// - in the Nexus WorkflowRunOperation.
+		// When this field is ignored, you must set WorkflowIDConflictPolicy to UseExisting to prevent
+		// erroring.
 		//
 		// Optional: defaults to false
 		WorkflowExecutionErrorWhenAlreadyStarted bool
@@ -687,6 +706,7 @@ type (
 		// │ │ │ │ │
 		// │ │ │ │ │
 		// * * * * *
+		// Cannot be set the same time as a StartDelay or in WithStartWorkflowOperation.
 		CronSchedule string
 
 		// Memo - Optional non-indexed info that will be shown in list workflow.
@@ -712,6 +732,7 @@ type (
 		TypedSearchAttributes SearchAttributes
 
 		// EnableEagerStart - request eager execution for this workflow, if a local worker is available.
+		// Cannot be set in WithStartWorkflowOperation.
 		//
 		// WARNING: Eager start does not respect worker versioning. An eagerly started workflow may run on
 		// any available local worker even if that worker is not in the default build ID set.
@@ -721,7 +742,7 @@ type (
 
 		// StartDelay - Time to wait before dispatching the first workflow task.
 		// A signal from signal with start will not trigger a workflow task.
-		// Cannot be set the same time as a CronSchedule.
+		// Cannot be set the same time as a CronSchedule or in WithStartWorkflowOperation.
 		StartDelay time.Duration
 
 		// StaticSummary - Single-line fixed summary for this workflow execution that will appear in UI/CLI. This can be
@@ -741,30 +762,50 @@ type (
 		// NOTE: Experimental
 		StaticDetails string
 
+		// VersioningOverride - Sets the versioning configuration of a specific workflow execution, ignoring current
+		// server or worker default policies. This enables running canary tests without affecting existing workflows.
+		// To unset the override after the workflow is running, use [UpdateWorkflowExecutionOptions].
+		//
+		// Optional: defaults to no override.
+		//
+		// NOTE: Experimental
+		VersioningOverride VersioningOverride
+
 		// request ID. Only settable by the SDK - e.g. [temporalnexus.workflowRunOperation].
 		requestID string
 		// workflow completion callback. Only settable by the SDK - e.g. [temporalnexus.workflowRunOperation].
 		callbacks []*commonpb.Callback
 		// links. Only settable by the SDK - e.g. [temporalnexus.workflowRunOperation].
-		links     []*commonpb.Link
+		links []*commonpb.Link
+
+		// OnConflictOptions - Optional workflow ID conflict options used in conjunction with conflict policy
+		// WORKFLOW_ID_CONFLICT_POLICY_USE_EXISTING. If onConflictOptions is set and a workflow is already
+		// running, the options specifies the actions to be taken on the running workflow. If not set or use
+		// together with any other WorkflowIDConflictPolicy, this parameter is ignored.
+		//
+		// NOTE: Only settable by the SDK -- e.g. [temporalnexus.workflowRunOperation].
+		onConflictOptions *OnConflictOptions
 	}
 
-	// WithStartWorkflowOperation is a type of operation that can be executed as part of a workflow start.
+	// WithStartWorkflowOperation defines how to start a workflow when using UpdateWithStartWorkflow.
+	// See [NewWithStartWorkflowOperation] and [UpdateWithStartWorkflow].
+	//
+	// NOTE: Experimental
 	WithStartWorkflowOperation interface {
-		isWithStartWorkflowOperation()
+		// Get returns the WorkflowRun that was targeted by the UpdateWithStartWorkflow call.
+		// This is a blocking API.
+		Get(ctx context.Context) (WorkflowRun, error)
 	}
 
-	// UpdateWithStartWorkflowOperation is used to perform Update-with-Start.
-	// See NewUpdateWithStartWorkflowOperation for details.
-	UpdateWithStartWorkflowOperation struct {
-		input *ClientUpdateWorkflowInput
+	withStartWorkflowOperationImpl struct {
+		input *ClientExecuteWorkflowInput
 		// flag to ensure the operation is only executed once
 		executed atomic.Bool
 		// channel to indicate that handle or err is available
 		doneCh chan struct{}
-		// handle and err cannot be accessed before doneCh is closed
-		handle WorkflowUpdateHandle
-		err    error
+		// workflowRun and err cannot be accessed before doneCh is closed
+		workflowRun WorkflowRun
+		err         error
 	}
 
 	// RetryPolicy defines the retry policy.
@@ -773,6 +814,8 @@ type (
 	// started time. Because of that, to check an activity has started or not, you cannot rely on history events. Instead,
 	// you can use CLI to describe the workflow to see the status of the activity:
 	//     tctl --ns <namespace> wf desc -w <wf-id>
+	//
+	// Exposed as: [go.temporal.io/sdk/temporal.RetryPolicy]
 	RetryPolicy struct {
 		// Backoff interval for the first retry. If BackoffCoefficient is 1.0 then it is used for all retries.
 		// If not set or set to 0, a default interval of 1s will be used.
@@ -792,6 +835,7 @@ type (
 		MaximumAttempts int32
 
 		// Non-Retriable errors. This is optional. Temporal server will stop retry if error type matches this list.
+		//
 		// Note:
 		//  - cancellation is not a failure, so it won't be retried,
 		//  - only StartToClose or Heartbeat timeouts are retryable.
@@ -834,6 +878,8 @@ type (
 )
 
 // Credentials are optional credentials that can be specified in ClientOptions.
+//
+// Exposed as: [go.temporal.io/sdk/client.Credentials]
 type Credentials interface {
 	applyToOptions(*ConnectionOptions) error
 	// Can return nil to have no interceptor
@@ -841,12 +887,16 @@ type Credentials interface {
 }
 
 // DialClient creates a client and attempts to connect to the server.
+//
+// Exposed as: [go.temporal.io/sdk/client.DialContext]
 func DialClient(ctx context.Context, options ClientOptions) (Client, error) {
 	options.ConnectionOptions.disableEagerConnection = false
 	return NewClient(ctx, options)
 }
 
 // NewLazyClient creates a client and does not attempt to connect to the server.
+//
+// Exposed as: [go.temporal.io/sdk/client.NewLazyClient]
 func NewLazyClient(options ClientOptions) (Client, error) {
 	options.ConnectionOptions.disableEagerConnection = true
 	return NewClient(context.Background(), options)
@@ -855,12 +905,16 @@ func NewLazyClient(options ClientOptions) (Client, error) {
 // NewClient creates an instance of a workflow client
 //
 // Deprecated: Use DialClient or NewLazyClient instead.
+//
+// Exposed as: [go.temporal.io/sdk/client.NewClient]
 func NewClient(ctx context.Context, options ClientOptions) (Client, error) {
 	return newClient(ctx, options, nil)
 }
 
 // NewClientFromExisting creates a new client using the same connection as the
 // existing client.
+//
+// Exposed as: [go.temporal.io/sdk/client.NewClientFromExistingWithContext]
 func NewClientFromExisting(ctx context.Context, existingClient Client, options ClientOptions) (Client, error) {
 	existing, _ := existingClient.(*WorkflowClient)
 	if existing == nil {
@@ -991,7 +1045,7 @@ func NewServiceClient(workflowServiceClient workflowservice.WorkflowServiceClien
 		workerInterceptors:       workerInterceptors,
 		excludeInternalFromRetry: options.ConnectionOptions.excludeInternalFromRetry,
 		eagerDispatcher: &eagerWorkflowDispatcher{
-			workersByTaskQueue: make(map[string][]eagerWorker),
+			workersByTaskQueue: make(map[string]map[eagerWorker]struct{}),
 		},
 	}
 
@@ -1004,104 +1058,34 @@ func NewServiceClient(workflowServiceClient workflowservice.WorkflowServiceClien
 	return client
 }
 
-// DialCloudOperationsClient creates a cloud client to perform cloud-management
-// operations.
-func DialCloudOperationsClient(ctx context.Context, options CloudOperationsClientOptions) (CloudOperationsClient, error) {
-	// Set defaults
-	if options.MetricsHandler == nil {
-		options.MetricsHandler = metrics.NopHandler
-	}
-	if options.Logger == nil {
-		options.Logger = ilog.NewDefaultLogger()
-	}
-	if options.HostPort == "" {
-		options.HostPort = "saas-api.tmprl.cloud:443"
-	}
-	if options.Version != "" {
-		options.ConnectionOptions.DialOptions = append(
-			options.ConnectionOptions.DialOptions,
-			grpc.WithChainUnaryInterceptor(func(
-				ctx context.Context, method string, req, reply any,
-				cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption,
-			) error {
-				ctx = metadata.AppendToOutgoingContext(ctx, "temporal-cloud-api-version", options.Version)
-				return invoker(ctx, method, req, reply, cc, opts...)
-			}),
-		)
-	}
-	if options.Credentials != nil {
-		if err := options.Credentials.applyToOptions(&options.ConnectionOptions); err != nil {
-			return nil, err
-		}
-	}
-	if options.ConnectionOptions.TLS == nil && !options.DisableTLS {
-		options.ConnectionOptions.TLS = &tls.Config{}
-	}
-	// Exclude internal from retry by default
-	options.ConnectionOptions.excludeInternalFromRetry = &atomic.Bool{}
-	options.ConnectionOptions.excludeInternalFromRetry.Store(true)
-	// TODO(cretz): Pass through context on dial
-	conn, err := dial(newDialParameters(&ClientOptions{
-		HostPort:          options.HostPort,
-		ConnectionOptions: options.ConnectionOptions,
-		MetricsHandler:    options.MetricsHandler,
-		Credentials:       options.Credentials,
-	}, options.ConnectionOptions.excludeInternalFromRetry))
-	if err != nil {
-		return nil, err
-	}
-	return &cloudOperationsClient{
-		conn:               conn,
-		logger:             options.Logger,
-		cloudServiceClient: cloudservice.NewCloudServiceClient(conn),
-	}, nil
-}
-
-// NewUpdateWithStartWorkflowOperation returns an UpdateWithStartWorkflowOperation that can be used to perform Update-with-Start.
-func NewUpdateWithStartWorkflowOperation(options UpdateWorkflowOptions) *UpdateWithStartWorkflowOperation {
-	res := &UpdateWithStartWorkflowOperation{doneCh: make(chan struct{})}
-
-	input, err := createUpdateWorkflowInput(options)
-	if err != nil {
-		res.set(nil, err)
-	} else if options.RunID != "" {
-		res.set(nil, errors.New("RunID cannot be set because the workflow might not be running"))
-	}
-	if options.FirstExecutionRunID != "" {
-		res.set(nil, errors.New("FirstExecutionRunID cannot be set because the workflow might not be running"))
-	} else {
-		res.input = input
-	}
-
-	return res
-}
-
-// Get blocks until a server response has been received; or the context deadline is exceeded.
-func (op *UpdateWithStartWorkflowOperation) Get(ctx context.Context) (WorkflowUpdateHandle, error) {
+func (op *withStartWorkflowOperationImpl) Get(ctx context.Context) (WorkflowRun, error) {
 	select {
 	case <-op.doneCh:
-		return op.handle, op.err
+		return op.workflowRun, op.err
 	case <-ctx.Done():
+		if !op.executed.Load() {
+			return nil, fmt.Errorf("%w: %w", ctx.Err(), fmt.Errorf("operation was not executed"))
+		}
 		return nil, ctx.Err()
 	}
 }
 
-func (op *UpdateWithStartWorkflowOperation) markExecuted() error {
+func (op *withStartWorkflowOperationImpl) markExecuted() error {
 	if op.executed.Swap(true) {
 		return fmt.Errorf("was already executed")
 	}
 	return nil
 }
 
-func (op *UpdateWithStartWorkflowOperation) set(handle WorkflowUpdateHandle, err error) {
-	op.handle = handle
+func (op *withStartWorkflowOperationImpl) set(workflowRun WorkflowRun, err error) {
+	op.workflowRun = workflowRun
 	op.err = err
 	close(op.doneCh)
 }
 
-func (op *UpdateWithStartWorkflowOperation) isWithStartWorkflowOperation() {}
-
 // NewNamespaceClient creates an instance of a namespace client, to manager lifecycle of namespaces.
+//
+// Exposed as: [go.temporal.io/sdk/client.NewNamespaceClient]
 func NewNamespaceClient(options ClientOptions) (NamespaceClient, error) {
 	// Initialize root tags
 	if options.MetricsHandler == nil {
@@ -1142,6 +1126,8 @@ func newNamespaceServiceClient(workflowServiceClient workflowservice.WorkflowSer
 //
 //	var result string // This need to be same type as the one passed to RecordHeartbeat
 //	NewValue(data).Get(&result)
+//
+// Exposed as: [go.temporal.io/sdk/client.NewValue]
 func NewValue(data *commonpb.Payloads) converter.EncodedValue {
 	return newEncodedValue(data, nil)
 }
@@ -1154,16 +1140,20 @@ func NewValue(data *commonpb.Payloads) converter.EncodedValue {
 //	var result1 string
 //	var result2 int // These need to be same type as those arguments passed to RecordHeartbeat
 //	NewValues(data).Get(&result1, &result2)
+//
+// Exposed as: [go.temporal.io/sdk/client.NewValues]
 func NewValues(data *commonpb.Payloads) converter.EncodedValues {
 	return newEncodedValues(data, nil)
 }
 
 type apiKeyCredentials func(context.Context) (string, error)
 
+// Exposed as: [go.temporal.io/sdk/client.NewAPIKeyStaticCredentials]
 func NewAPIKeyStaticCredentials(apiKey string) Credentials {
 	return NewAPIKeyDynamicCredentials(func(ctx context.Context) (string, error) { return apiKey, nil })
 }
 
+// Exposed as: [go.temporal.io/sdk/client.NewAPIKeyDynamicCredentials]
 func NewAPIKeyDynamicCredentials(apiKeyCallback func(context.Context) (string, error)) Credentials {
 	return apiKeyCredentials(apiKeyCallback)
 }
@@ -1194,6 +1184,7 @@ func (a apiKeyCredentials) gRPCIntercept(
 
 type mTLSCredentials tls.Certificate
 
+// Exposed as: [go.temporal.io/sdk/client.NewMTLSCredentials]
 func NewMTLSCredentials(certificate tls.Certificate) Credentials { return mTLSCredentials(certificate) }
 
 func (m mTLSCredentials) applyToOptions(opts *ConnectionOptions) error {
@@ -1211,11 +1202,15 @@ func (mTLSCredentials) gRPCInterceptor() grpc.UnaryClientInterceptor { return ni
 // WorkflowUpdateServiceTimeoutOrCanceledError is an error that occurs when an update call times out or is cancelled.
 //
 // Note, this is not related to any general concept of timing out or cancelling a running update, this is only related to the client call itself.
+//
+// Exposed as: [go.temporal.io/sdk/client.WorkflowUpdateServiceTimeoutOrCanceledError]
 type WorkflowUpdateServiceTimeoutOrCanceledError struct {
 	cause error
 }
 
 // NewWorkflowUpdateServiceTimeoutOrCanceledError creates a new WorkflowUpdateServiceTimeoutOrCanceledError.
+//
+// Exposed as: [go.temporal.io/sdk/client.NewWorkflowUpdateServiceTimeoutOrCanceledError]
 func NewWorkflowUpdateServiceTimeoutOrCanceledError(err error) *WorkflowUpdateServiceTimeoutOrCanceledError {
 	return &WorkflowUpdateServiceTimeoutOrCanceledError{
 		cause: err,
@@ -1244,4 +1239,15 @@ func SetCallbacksOnStartWorkflowOptions(opts *StartWorkflowOptions, callbacks []
 // Links are purposefully not exposed to users for the time being.
 func SetLinksOnStartWorkflowOptions(opts *StartWorkflowOptions, links []*commonpb.Link) {
 	opts.links = links
+}
+
+// SetOnConflictOptionsOnStartWorkflowOptions is an internal only method for setting conflict
+// options on StartWorkflowOptions.
+// OnConflictOptions are purposefully not exposed to users for the time being.
+func SetOnConflictOptionsOnStartWorkflowOptions(opts *StartWorkflowOptions) {
+	opts.onConflictOptions = &OnConflictOptions{
+		AttachRequestID:           true,
+		AttachCompletionCallbacks: true,
+		AttachLinks:               true,
+	}
 }

@@ -314,6 +314,27 @@ func (s *internalWorkerTestSuite) TestReplayWorkflowHistory() {
 	require.NoError(s.T(), err)
 }
 
+func (s *internalWorkerTestSuite) TestReplayWorkflowHistory_IncompleteWorkflowExecution() {
+	taskQueue := "taskQueue1"
+	testEvents := []*historypb.HistoryEvent{
+		createTestEventWorkflowExecutionStarted(1, &historypb.WorkflowExecutionStartedEventAttributes{
+			WorkflowType: &commonpb.WorkflowType{Name: "testReplayWorkflow"},
+			TaskQueue:    &taskqueuepb.TaskQueue{Name: taskQueue},
+			Input:        testEncodeFunctionArgs(converter.GetDefaultDataConverter()),
+		}),
+		createTestEventWorkflowTaskScheduled(2, &historypb.WorkflowTaskScheduledEventAttributes{}),
+		createTestEventWorkflowTaskStarted(3),
+	}
+
+	history := &historypb.History{Events: testEvents}
+	logger := getLogger()
+	replayer, err := NewWorkflowReplayer(WorkflowReplayerOptions{})
+	require.NoError(s.T(), err)
+	replayer.RegisterWorkflow(testReplayWorkflow)
+	err = replayer.ReplayWorkflowHistory(logger, history)
+	require.NoError(s.T(), err)
+}
+
 func (s *internalWorkerTestSuite) TestReplayWorkflowHistory_LocalActivity() {
 	taskQueue := "taskQueue1"
 	testEvents := []*historypb.HistoryEvent{
@@ -1773,6 +1794,31 @@ func (s *internalWorkerTestSuite) TestNoActivitiesOrWorkflows() {
 	assert.NoError(t, w.Start())
 	assert.True(t, w.activityWorker.worker.isWorkerStarted)
 	assert.True(t, w.workflowWorker.worker.isWorkerStarted)
+	w.Stop()
+}
+
+func (s *internalWorkerTestSuite) TestCleanupIsBestEffort() {
+	namespace := "testNamespace"
+	service := workflowservicemock.NewMockWorkflowServiceClient(s.mockCtrl)
+
+	// set usual startup and polling mocks
+	service.EXPECT().GetSystemInfo(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&workflowservice.GetSystemInfoResponse{}, nil).AnyTimes()
+	setupPollingMocks(namespace, service, 0.0)
+
+	// ShutdownWorker will fail, but we expect Stop() to complete cleanly
+	service.EXPECT().ShutdownWorker(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(nil, &serviceerror.Internal{}).Times(1)
+
+	client := NewServiceClient(service, nil, ClientOptions{
+		Namespace: namespace,
+	})
+	worker := NewAggregatedWorker(client, "testGroupName2", WorkerOptions{})
+	worker.registry = newRegistry()
+
+	assert.NoError(s.T(), worker.Start())
+	assert.True(s.T(), worker.workflowWorker.worker.isWorkerStarted)
+	assert.NotPanics(s.T(), func() { worker.Stop() })
 }
 
 func (s *internalWorkerTestSuite) TestStartWorkerAfterStopped() {
@@ -1828,32 +1874,11 @@ func createWorkerWithThrottle(
 	service *workflowservicemock.MockWorkflowServiceClient, activitiesPerSecond float64, dc converter.DataConverter,
 ) *AggregatedWorker {
 	namespace := "testNamespace"
-	namespaceState := enumspb.NAMESPACE_STATE_REGISTERED
-	namespaceDesc := &workflowservice.DescribeNamespaceResponse{
-		NamespaceInfo: &namespacepb.NamespaceInfo{
-			Name:  namespace,
-			State: namespaceState,
-		},
-	}
-	// mocks
-	service.EXPECT().DescribeNamespace(gomock.Any(), gomock.Any(), gomock.Any()).Return(namespaceDesc, nil).Do(
-		func(ctx context.Context, request *workflowservice.DescribeNamespaceRequest, opts ...grpc.CallOption) {
-			// log
-		}).AnyTimes()
 
-	activityTask := &workflowservice.PollActivityTaskQueueResponse{}
-	expectedActivitiesPerSecond := activitiesPerSecond
-	if expectedActivitiesPerSecond == 0.0 {
-		expectedActivitiesPerSecond = defaultTaskQueueActivitiesPerSecond
-	}
-	service.EXPECT().PollActivityTaskQueue(
-		gomock.Any(), ofPollActivityTaskQueueRequest(expectedActivitiesPerSecond), gomock.Any(),
-	).Return(activityTask, nil).AnyTimes()
-	service.EXPECT().RespondActivityTaskCompleted(gomock.Any(), gomock.Any(), gomock.Any()).Return(&workflowservice.RespondActivityTaskCompletedResponse{}, nil).AnyTimes()
+	setupPollingMocks(namespace, service, activitiesPerSecond)
 
-	workflowTask := &workflowservice.PollWorkflowTaskQueueResponse{}
-	service.EXPECT().PollWorkflowTaskQueue(gomock.Any(), gomock.Any(), gomock.Any()).Return(workflowTask, nil).AnyTimes()
-	service.EXPECT().RespondWorkflowTaskCompleted(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	service.EXPECT().ShutdownWorker(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&workflowservice.ShutdownWorkerResponse{}, nil).Times(1)
 
 	// Configure worker options.
 	workerOptions := WorkerOptions{
@@ -1872,6 +1897,35 @@ func createWorkerWithThrottle(
 	client := NewServiceClient(service, nil, clientOptions)
 	worker := NewAggregatedWorker(client, "testGroupName2", workerOptions)
 	return worker
+}
+
+func setupPollingMocks(namespace string, service *workflowservicemock.MockWorkflowServiceClient, activitiesPerSecond float64) {
+	namespaceState := enumspb.NAMESPACE_STATE_REGISTERED
+	namespaceDesc := &workflowservice.DescribeNamespaceResponse{
+		NamespaceInfo: &namespacepb.NamespaceInfo{
+			Name:  namespace,
+			State: namespaceState,
+		},
+	}
+
+	service.EXPECT().DescribeNamespace(gomock.Any(), gomock.Any(), gomock.Any()).Return(namespaceDesc, nil).Do(
+		func(ctx context.Context, request *workflowservice.DescribeNamespaceRequest, opts ...grpc.CallOption) {
+			// log
+		}).AnyTimes()
+
+	activityTask := &workflowservice.PollActivityTaskQueueResponse{}
+	expectedActivitiesPerSecond := activitiesPerSecond
+	if expectedActivitiesPerSecond == 0.0 {
+		expectedActivitiesPerSecond = defaultTaskQueueActivitiesPerSecond
+	}
+	service.EXPECT().PollActivityTaskQueue(
+		gomock.Any(), ofPollActivityTaskQueueRequest(expectedActivitiesPerSecond), gomock.Any(),
+	).Return(activityTask, nil).AnyTimes()
+	service.EXPECT().RespondActivityTaskCompleted(gomock.Any(), gomock.Any(), gomock.Any()).Return(&workflowservice.RespondActivityTaskCompletedResponse{}, nil).AnyTimes()
+
+	workflowTask := &workflowservice.PollWorkflowTaskQueueResponse{}
+	service.EXPECT().PollWorkflowTaskQueue(gomock.Any(), gomock.Any(), gomock.Any()).Return(workflowTask, nil).AnyTimes()
+	service.EXPECT().RespondWorkflowTaskCompleted(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
 }
 
 func createWorkerWithDataConverter(service *workflowservicemock.MockWorkflowServiceClient) *AggregatedWorker {
@@ -2832,7 +2886,10 @@ func TestWorkerBuildIDAndSessionPanic(t *testing.T) {
 	var recovered interface{}
 	func() {
 		defer func() { recovered = recover() }()
-		worker := NewAggregatedWorker(&WorkflowClient{}, "some-task-queue", WorkerOptions{EnableSessionWorker: true, UseBuildIDForVersioning: true})
+		worker := NewAggregatedWorker(&WorkflowClient{}, "some-task-queue", WorkerOptions{
+			EnableSessionWorker:     true,
+			UseBuildIDForVersioning: true,
+		})
 		worker.RegisterWorkflow(testReplayWorkflow)
 	}()
 	require.Equal(t, "cannot set both EnableSessionWorker and UseBuildIDForVersioning", recovered)
@@ -2912,4 +2969,41 @@ func TestAliasUnqualifiedNameClash(t *testing.T) {
 	// never want called. But with disabling alias, no problem.
 	require.Equal(t, "func3", executeWorkflow(false))
 	require.Equal(t, "func1", executeWorkflow(true))
+}
+
+func (s *internalWorkerTestSuite) TestReservedTemporalName() {
+	// workflow
+	worker := createWorker(s.service)
+	workflowFn := func(ctx Context) error { return nil }
+	err := runAndCatchPanic(func() {
+		worker.RegisterWorkflowWithOptions(workflowFn, RegisterWorkflowOptions{Name: "__temporal_workflow"})
+	})
+	require.Error(s.T(), err)
+	require.Contains(s.T(), err.Error(), temporalPrefixError)
+
+	// activity
+	activityFn := func() error {
+		return nil
+	}
+	err = runAndCatchPanic(func() {
+		worker.RegisterActivityWithOptions(activityFn, RegisterActivityOptions{Name: "__temporal_workflow"})
+	})
+	require.Error(s.T(), err)
+	require.Contains(s.T(), err.Error(), temporalPrefixError)
+
+	err = worker.Start()
+	require.NoError(s.T(), err)
+	worker.Stop()
+
+	// task queue
+	namespace := "testNamespace"
+	service := workflowservicemock.NewMockWorkflowServiceClient(s.mockCtrl)
+	client := NewServiceClient(service, nil, ClientOptions{
+		Namespace: namespace,
+	})
+	err = runAndCatchPanic(func() {
+		_ = NewAggregatedWorker(client, "__temporal_task_queue", WorkerOptions{})
+	})
+	require.Error(s.T(), err)
+	require.Contains(s.T(), err.Error(), temporalPrefixError)
 }

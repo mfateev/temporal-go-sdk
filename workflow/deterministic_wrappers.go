@@ -69,7 +69,14 @@ type (
 	Semaphore = internal.Semaphore
 
 	// TimerOptions are options for [NewTimerWithOptions]
+	//
+	// NOTE: Experimental
 	TimerOptions = internal.TimerOptions
+
+	// AwaitOptions are options for [AwaitWithOptions]
+	//
+	// NOTE: Experimental
+	AwaitOptions = internal.AwaitOptions
 )
 
 // Await blocks the calling thread until condition() returns true.
@@ -107,6 +114,21 @@ func Await(ctx Context, condition func() bool) error {
 //	})
 func AwaitWithTimeout(ctx Context, timeout time.Duration, condition func() bool) (ok bool, err error) {
 	return internal.AwaitWithTimeout(ctx, timeout, condition)
+}
+
+// AwaitWithOptions blocks the calling thread until condition() returns true
+// or blocking time exceeds the passed timeout value.
+// Returns ok=false if timed out, and err CanceledError if the ctx is canceled.
+// The following code will block until the captured count
+// variable is set to 5, or one hour passes.
+//
+//	workflow.AwaitWithOptions(ctx, AwaitOptions{Timeout: time.Hour, TimerOptions: TimerOptions{Summary:"Example"}}, func() bool {
+//	  return count == 5
+//	})
+//
+// NOTE: Experimental
+func AwaitWithOptions(ctx Context, options AwaitOptions, condition func() bool) (ok bool, err error) {
+	return internal.AwaitWithOptions(ctx, options, condition)
 }
 
 // NewChannel creates a new Channel instance
@@ -199,6 +221,8 @@ func NewTimer(ctx Context, d time.Duration) Future {
 // use this NewTimerWithOptions() to get the timer, instead of Go's timer.NewTimer(). You can cancel the pending timer
 // by canceling the Context (using the context from workflow.WithCancel(ctx)) and that will cancel the timer. After the
 // timer is canceled, the returned Future becomes ready, and Future.Get() will return *CanceledError.
+//
+// NOTE: Experimental
 func NewTimerWithOptions(ctx Context, d time.Duration, options TimerOptions) Future {
 	return internal.NewTimerWithOptions(ctx, d, options)
 }

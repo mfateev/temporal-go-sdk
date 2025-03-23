@@ -610,3 +610,91 @@ func ListAndDescribeWorkflow(ctx workflow.Context) (int, error) {
 	}
 	return len(result.Executions), nil
 }
+
+func SelectorBlockingDefaultWorkflow(ctx workflow.Context) error {
+	logger := workflow.GetLogger(ctx)
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: 10 * time.Second,
+	}
+	ctx = workflow.WithActivityOptions(ctx, ao)
+
+	ch1 := workflow.NewChannel(ctx)
+	ch2 := workflow.NewChannel(ctx)
+
+	workflow.Go(ctx, func(ctx workflow.Context) {
+		ch1.Send(ctx, "one")
+
+	})
+
+	workflow.Go(ctx, func(ctx workflow.Context) {
+		ch2.Send(ctx, "two")
+	})
+
+	selector := workflow.NewSelector(ctx)
+	var s string
+	selector.AddReceive(ch1, func(c workflow.ReceiveChannel, more bool) {
+		c.Receive(ctx, &s)
+	})
+	selector.AddDefault(func() {
+		ch2.Receive(ctx, &s)
+	})
+	selector.Select(ctx)
+	if selector.HasPending() {
+		var result string
+		activity := workflow.ExecuteActivity(ctx, SelectorBlockingDefaultActivity, "Signal not lost")
+		activity.Get(ctx, &result)
+		logger.Info("Result", result)
+	} else {
+		logger.Info("Signal in ch1 lost")
+		return nil
+	}
+	return nil
+}
+
+func SelectorBlockingDefaultActivity(ctx context.Context, value string) (string, error) {
+	logger := activity.GetLogger(ctx)
+	logger.Info("Activity", "value", value)
+	return value + " was logged!", nil
+}
+
+func TripWorkflow(ctx workflow.Context, tripCounter int) error {
+	logger := workflow.GetLogger(ctx)
+	workflowID := workflow.GetInfo(ctx).WorkflowExecution.ID
+	logger.Info("Trip Workflow Started for User.",
+		"User", workflowID,
+		"TripCounter", tripCounter)
+
+	// TripCh to wait on trip completed event signals
+	tripCh := workflow.GetSignalChannel(ctx, "trip_event")
+	for i := 0; i < 10; i++ {
+		var trip int
+		tripCh.Receive(ctx, &trip)
+		logger.Info("Trip complete event received.", "Total", trip)
+		tripCounter++
+	}
+
+	logger.Info("Starting a new run.", "TripCounter", tripCounter)
+	return workflow.NewContinueAsNewError(ctx, "TripWorkflow", tripCounter)
+}
+
+// TestWorkflowWithChild is a test workflow that executes a child workflow and returns the result from it.
+func ResetWorkflowWithChild(ctx workflow.Context) (string, error) {
+	logger := workflow.GetLogger(ctx)
+
+	logger.Info("Starting workflow with child...")
+	cwo := workflow.ChildWorkflowOptions{
+		ParentClosePolicy:     enums.PARENT_CLOSE_POLICY_TERMINATE,
+		WorkflowIDReusePolicy: enums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE,
+	}
+	ctx = workflow.WithChildOptions(ctx, cwo)
+	child := workflow.ExecuteChildWorkflow(ctx, "TestChildWorkflow", "CHILD INPUT")
+
+	var result string
+	if err := child.Get(ctx, &result); err != nil {
+		logger.Error("Child execution failed: " + err.Error())
+		return "", err
+	}
+
+	logger.Info("Child execution completed with result: " + result)
+	return result, nil
+}

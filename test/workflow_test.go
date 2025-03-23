@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	mathrand "math/rand/v2"
 	"reflect"
 	"strconv"
 	"strings"
@@ -2278,6 +2279,18 @@ func (w *Workflows) WaitSignalToStart(ctx workflow.Context) (string, error) {
 	return value, nil
 }
 
+func (w *Workflows) WaitSignalToStartVersionedOne(ctx workflow.Context) (string, error) {
+	var value string
+	workflow.GetSignalChannel(ctx, "start-signal").Receive(ctx, &value)
+	return value + "_v1", nil
+}
+
+func (w *Workflows) WaitSignalToStartVersionedTwo(ctx workflow.Context) (string, error) {
+	var value string
+	workflow.GetSignalChannel(ctx, "start-signal").Receive(ctx, &value)
+	return value + "_v2", nil
+}
+
 func (w *Workflows) BuildIDWorkflow(ctx workflow.Context) error {
 	activityRan := false
 	_ = workflow.SetQueryHandler(ctx, "get-last-build-id", func() (string, error) {
@@ -2701,6 +2714,40 @@ func (w *Workflows) WorkflowWithRejectableUpdate(ctx workflow.Context) error {
 	return nil
 }
 
+func (w *Workflows) WorkflowWithUpdate(ctx workflow.Context) error {
+	workflow.SetUpdateHandlerWithOptions(ctx, "update",
+		func(ctx workflow.Context, count int) error {
+			for i := 0; i < count; i++ {
+				var i int
+				err := workflow.SideEffect(ctx, func(ctx workflow.Context) interface{} {
+					return mathrand.IntN(4)
+				}).Get(&i)
+				if err != nil {
+					return err
+				}
+				if i == 0 {
+					workflow.NewTimer(ctx, time.Hour)
+				} else if i == 1 {
+					workflow.GetVersion(ctx, "change-id", workflow.DefaultVersion, 1)
+				} else if i == 2 {
+					ctx = workflow.WithActivityOptions(ctx, w.defaultActivityOptions())
+					var a *Activities
+					workflow.ExecuteActivity(ctx, a.WaitForWorkerStop, time.Hour)
+				}
+			}
+			return nil
+		}, workflow.UpdateHandlerOptions{
+			Validator: func(ctx workflow.Context, count int) error {
+				if count <= 0 {
+					return errors.New("test update rejected")
+				}
+				return nil
+			},
+		})
+	workflow.GetSignalChannel(ctx, "unblock").Receive(ctx, nil)
+	return nil
+}
+
 func (w *Workflows) UpdateOrdering(ctx workflow.Context) (int, error) {
 	updatesRan := 0
 	updateHandle := func(ctx workflow.Context) error {
@@ -2782,6 +2829,33 @@ func (w *Workflows) ForcedNonDeterminism(ctx workflow.Context, sameCommandButDif
 		}
 	}
 	return
+}
+
+var shouldEmitCommand = true
+
+func (w *Workflows) NonDeterminismCommandNotFoundWorkflow(ctx workflow.Context) error {
+	workflow.SetUpdateHandler(ctx, "wait-for-wft-completion", func(ctx workflow.Context) error {
+		return nil
+	})
+	if shouldEmitCommand {
+		_ = workflow.SideEffect(ctx, func(ctx workflow.Context) any {
+			return nil
+		}).Get(nil)
+	}
+	workflow.Sleep(ctx, 999*time.Hour)
+	return nil
+}
+
+func (w *Workflows) NonDeterminismReplay(ctx workflow.Context) error {
+	ctx = workflow.WithActivityOptions(ctx, w.defaultActivityOptions())
+	var a Activities
+	var err error
+	if forcedNonDeterminismCounter == 0 {
+		err = workflow.ExecuteActivity(ctx, a.Sleep, 1*time.Millisecond).Get(ctx, nil)
+	} else {
+		err = workflow.Sleep(ctx, 1*time.Millisecond)
+	}
+	return err
 }
 
 func (w *Workflows) ScheduleTypedSearchAttributesWorkflow(ctx workflow.Context) (string, error) {
@@ -3080,6 +3154,7 @@ func (w *Workflows) UpsertMemo(ctx workflow.Context, memo map[string]interface{}
 }
 
 func (w *Workflows) UserMetadata(ctx workflow.Context) error {
+	var activities *Activities
 	// Define an update and query handler
 	err := workflow.SetQueryHandlerWithOptions(
 		ctx,
@@ -3111,12 +3186,47 @@ func (w *Workflows) UserMetadata(ctx workflow.Context) error {
 	).Receive(ctx, nil)
 	workflow.SetCurrentDetails(ctx, "current-details-2")
 
+	// Start an activity with a description
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: time.Minute,
+		Summary:             "my-activity",
+	}
+	ctx = workflow.WithActivityOptions(ctx, ao)
+	var result string
+	err = workflow.ExecuteActivity(ctx, activities.EmptyActivity).Get(ctx, &result)
+	if err != nil {
+		return err
+	}
+
+	// Start a child workflow with a description
+	cwo := workflow.ChildWorkflowOptions{
+		StaticSummary: "my-child-wf-summary",
+		StaticDetails: "my-child-wf-details",
+	}
+	ctx = workflow.WithChildOptions(ctx, cwo)
+	err = workflow.ExecuteChildWorkflow(ctx, w.SimplestWorkflow).Get(ctx, nil)
+	if err != nil {
+		return err
+	}
+
 	// Run a short timer with a summary and return
 	return workflow.NewTimerWithOptions(
 		ctx,
 		1*time.Millisecond,
 		workflow.TimerOptions{Summary: "my-timer"},
 	).Get(ctx, nil)
+}
+
+func (w *Workflows) AwaitWithOptions(ctx workflow.Context) (bool, error) {
+	options := workflow.AwaitOptions{
+		Timeout:      1 * time.Millisecond,
+		TimerOptions: workflow.TimerOptions{Summary: "await-timer"},
+	}
+
+	return workflow.AwaitWithOptions(ctx, options, func() bool {
+		return true
+	})
+
 }
 
 func (w *Workflows) RunsLocalAndNonlocalActsWithRetries(ctx workflow.Context, numOfEachActKind int, actFailTimes int) error {
@@ -3148,6 +3258,158 @@ func (w *Workflows) RunsLocalAndNonlocalActsWithRetries(ctx workflow.Context, nu
 		}
 	}
 	return nil
+}
+
+func (w *Workflows) SelectorBlockSignal(ctx workflow.Context) (string, error) {
+	ctx = workflow.WithActivityOptions(ctx, w.defaultActivityOptions())
+	var logger = workflow.GetLogger(ctx)
+	logger.Info("calling ExecuteActivity")
+	ch1 := workflow.NewChannel(ctx)
+	ch2 := workflow.NewChannel(ctx)
+
+	workflow.Go(ctx, func(ctx workflow.Context) {
+		ch1.Send(ctx, "one")
+
+	})
+
+	workflow.Go(ctx, func(ctx workflow.Context) {
+		ch2.Send(ctx, "two")
+	})
+
+	selector := workflow.NewSelector(ctx)
+	var s string
+	selector.AddReceive(ch1, func(c workflow.ReceiveChannel, more bool) {
+		c.Receive(ctx, &s)
+	})
+	selector.AddDefault(func() {
+		ch2.Receive(ctx, &s)
+	})
+	selector.Select(ctx)
+
+	var hello = "hello"
+	if selector.HasPending() {
+		var result string
+		activity := workflow.ExecuteActivity(ctx, "Prefix_ToUpper", hello)
+		activity.Get(ctx, &result)
+		logger.Info("Result", result)
+		return result, nil
+	} else {
+		logger.Info("Signal in ch1 lost")
+	}
+	return hello, nil
+}
+
+func (w *Workflows) CommandsFuzz(ctx workflow.Context) error {
+	var seed uint64
+	if err := workflow.SideEffect(ctx, func(ctx workflow.Context) interface{} {
+		return time.Now().UnixNano()
+	}).Get(&seed); err != nil {
+		return err
+	}
+	rnd := mathrand.New(mathrand.NewPCG(seed, seed))
+
+	iterations := 10
+
+	for i := 0; i < iterations; i++ {
+		cmd := rnd.IntN(7)
+
+		switch cmd {
+		case 0:
+			// Version markers
+			_ = workflow.GetVersion(ctx, "random-id-1", workflow.DefaultVersion, 0)
+		case 1:
+			// Activity
+			ctx = workflow.WithActivityOptions(ctx, w.defaultActivityOptions())
+			var ans1 string
+			err := workflow.ExecuteActivity(ctx, "Prefix_ToUpperWithDelay", "hello", time.Second).Get(ctx, &ans1)
+			if err != nil {
+				return err
+			}
+		case 2:
+			// LocalActivity
+			laCtx := workflow.WithLocalActivityOptions(ctx, w.defaultLocalActivityOptions())
+			_ = workflow.ExecuteLocalActivity(laCtx, LocalSleep, time.Millisecond*1).Get(laCtx, nil)
+		case 3:
+			// Search Attributes
+			tsa := workflow.GetTypedSearchAttributes(ctx)
+			var result testSearchAttributes
+			result.SearchAttributes = map[string]testSearchAttribute{}
+			for _, k := range workflow.DeterministicKeysFunc(tsa.GetUntypedValues(), func(a, b temporal.SearchAttributeKey) int {
+				if a.GetName() < b.GetName() {
+					return -1
+				}
+				return 1
+			}) {
+				result.SearchAttributes[k.GetName()] = testSearchAttribute{
+					Value: tsa.GetUntypedValues()[k],
+					Type:  k.GetValueType(),
+				}
+			}
+		case 4:
+			// UpsertMemo
+			if err := workflow.UpsertMemo(ctx, map[string]interface{}{"TestMemo": "set"}); err != nil {
+				return err
+			}
+		case 5:
+			// Signal & ExecuteChildWorkflow
+			cwo := workflow.ChildWorkflowOptions{
+				WorkflowID: "ABC-SIMPLE-CHILD-WORKFLOW-ID-SIGNAL-FUZZ" + strconv.Itoa(i),
+			}
+			childCtx := workflow.WithChildOptions(ctx, cwo)
+			child := workflow.ExecuteChildWorkflow(childCtx, w.childWorkflowWaitOnSignal)
+			var childWE workflow.Execution
+			err := child.GetChildWorkflowExecution().Get(ctx, &childWE)
+			if err != nil {
+				return err
+
+			}
+			err = workflow.SignalExternalWorkflow(ctx, childWE.ID, childWE.RunID, "unblock", nil).Get(ctx, nil)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (w *Workflows) WorkflowClientFromActivity(ctx workflow.Context) error {
+	ctx = workflow.WithActivityOptions(ctx, w.defaultActivityOptions())
+	var activities *Activities
+	err := workflow.ExecuteActivity(ctx, activities.ClientFromActivity).Get(ctx, nil)
+	if err != nil {
+		return err
+	}
+
+	ctx = workflow.WithLocalActivityOptions(ctx, w.defaultLocalActivityOptions())
+	return workflow.ExecuteLocalActivity(ctx, activities.ClientFromActivity).Get(ctx, nil)
+}
+
+func (w *Workflows) WorkflowTemporalPrefixSignal(ctx workflow.Context) error {
+	_ = workflow.GetSignalChannel(ctx, "__temporal_signal").Receive(ctx, nil)
+	return nil
+}
+
+// WorkflowWithChildren starts two child workflows and waits for them to complete in sequence.
+func (w *Workflows) WorkflowWithChildren(ctx workflow.Context) (string, error) {
+	var result string
+	err := workflow.ExecuteChildWorkflow(ctx, w.child, "hello child-1", false).Get(ctx, &result)
+	if err != nil {
+		return "", err
+	}
+
+	var result2 string
+	err = workflow.ExecuteChildWorkflow(ctx, w.child, "hello child-2", false).Get(ctx, &result2)
+	if err != nil {
+		return "", err
+	}
+
+	var result3 string
+	err = workflow.ExecuteChildWorkflow(ctx, w.child, "hello child-2", false).Get(ctx, &result3)
+	if err != nil {
+		return "", err
+	}
+
+	return "Parent Workflow Complete", nil
 }
 
 func (w *Workflows) register(worker worker.Worker) {
@@ -3223,6 +3485,7 @@ func (w *Workflows) register(worker worker.Worker) {
 	worker.RegisterWorkflow(w.WorkflowWithParallelSideEffects)
 	worker.RegisterWorkflow(w.WorkflowWithParallelMutableSideEffects)
 	worker.RegisterWorkflow(w.WorkflowWithLocalActivityStartToCloseTimeout)
+	worker.RegisterWorkflow(w.WorkflowWithChildren)
 	worker.RegisterWorkflow(w.LocalActivityStaleCache)
 	worker.RegisterWorkflow(w.UpdateInfoWorkflow)
 	worker.RegisterWorkflow(w.UpdateEntityWorkflow)
@@ -3247,6 +3510,8 @@ func (w *Workflows) register(worker worker.Worker) {
 	worker.RegisterWorkflow(w.SignalCounter)
 	worker.RegisterWorkflow(w.PanicOnSignal)
 	worker.RegisterWorkflow(w.ForcedNonDeterminism)
+	worker.RegisterWorkflow(w.NonDeterminismCommandNotFoundWorkflow)
+	worker.RegisterWorkflow(w.NonDeterminismReplay)
 	worker.RegisterWorkflow(w.MutableSideEffect)
 	worker.RegisterWorkflow(w.HistoryLengths)
 	worker.RegisterWorkflow(w.HeartbeatSpecificCount)
@@ -3268,7 +3533,9 @@ func (w *Workflows) register(worker worker.Worker) {
 	worker.RegisterWorkflow(w.UpdateWithMutex)
 	worker.RegisterWorkflow(w.UpdateWithSemaphore)
 	worker.RegisterWorkflow(w.UserMetadata)
+	worker.RegisterWorkflow(w.AwaitWithOptions)
 	worker.RegisterWorkflow(w.WorkflowWithRejectableUpdate)
+	worker.RegisterWorkflow(w.WorkflowWithUpdate)
 
 	worker.RegisterWorkflow(w.child)
 	worker.RegisterWorkflow(w.childWithRetryPolicy)
@@ -3284,6 +3551,10 @@ func (w *Workflows) register(worker worker.Worker) {
 	worker.RegisterWorkflow(w.UpdateSetHandlerOnly)
 	worker.RegisterWorkflow(w.Echo)
 	worker.RegisterWorkflow(w.RunsLocalAndNonlocalActsWithRetries)
+	worker.RegisterWorkflow(w.SelectorBlockSignal)
+	worker.RegisterWorkflow(w.CommandsFuzz)
+	worker.RegisterWorkflow(w.WorkflowClientFromActivity)
+	worker.RegisterWorkflow(w.WorkflowTemporalPrefixSignal)
 }
 
 func (w *Workflows) defaultActivityOptions() workflow.ActivityOptions {

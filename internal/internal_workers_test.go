@@ -32,7 +32,7 @@ import (
 	"time"
 
 	"github.com/golang/mock/gomock"
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/durationpb"
@@ -100,6 +100,7 @@ func (s *WorkersTestSuite) TestWorkflowWorker() {
 	s.service.EXPECT().DescribeNamespace(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil)
 	s.service.EXPECT().PollWorkflowTaskQueue(gomock.Any(), gomock.Any(), gomock.Any()).Return(&workflowservice.PollWorkflowTaskQueueResponse{}, nil).AnyTimes()
 	s.service.EXPECT().RespondWorkflowTaskCompleted(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil).AnyTimes()
+	s.service.EXPECT().ShutdownWorker(gomock.Any(), gomock.Any(), gomock.Any()).Return(&workflowservice.ShutdownWorkerResponse{}, nil).Times(1)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	executionParameters := workerExecutionParameters{
@@ -111,11 +112,13 @@ func (s *WorkersTestSuite) TestWorkflowWorker() {
 		UserContextCancel:                     cancel,
 	}
 	overrides := &workerOverrides{workflowTaskHandler: newSampleWorkflowTaskHandler()}
-	workflowWorker := newWorkflowWorkerInternal(s.service, executionParameters, nil, overrides, newRegistry())
+	client := &WorkflowClient{workflowService: s.service}
+	workflowWorker := newWorkflowWorkerInternal(client, executionParameters, nil, overrides, newRegistry())
 	_ = workflowWorker.Start()
 	workflowWorker.Stop()
 
 	s.NoError(ctx.Err())
+
 }
 
 type CountingSlotSupplier struct {
@@ -185,6 +188,7 @@ func (s *WorkersTestSuite) TestWorkflowWorkerSlotSupplier() {
 				pollRespondedCh <- struct{}{}
 			}).
 			Return(nil, nil).AnyTimes()
+		s.service.EXPECT().ShutdownWorker(gomock.Any(), gomock.Any(), gomock.Any()).Return(&workflowservice.ShutdownWorkerResponse{}, nil).Times(1)
 
 		ctx, cancel := context.WithCancel(context.Background())
 		wfCss := &CountingSlotSupplier{}
@@ -205,7 +209,8 @@ func (s *WorkersTestSuite) TestWorkflowWorkerSlotSupplier() {
 			WorkerStopTimeout:                     time.Second,
 		}
 		overrides := &workerOverrides{workflowTaskHandler: newSampleWorkflowTaskHandler()}
-		workflowWorker := newWorkflowWorkerInternal(s.service, executionParameters, nil, overrides, newRegistry())
+		client := &WorkflowClient{workflowService: s.service}
+		workflowWorker := newWorkflowWorkerInternal(client, executionParameters, nil, overrides, newRegistry())
 		_ = workflowWorker.Start()
 		unblockPollCh <- struct{}{}
 		<-pollRespondedCh
@@ -264,7 +269,8 @@ func (s *WorkersTestSuite) TestActivityWorkerSlotSupplier() {
 		a := &greeterActivity{}
 		registry := newRegistry()
 		registry.addActivityWithLock(a.ActivityType().Name, a)
-		activityWorker := newActivityWorker(s.service, executionParameters, overrides, registry, nil)
+		client := WorkflowClient{workflowService: s.service}
+		activityWorker := newActivityWorker(&client, executionParameters, overrides, registry, nil)
 		_ = activityWorker.Start()
 		unblockPollCh <- struct{}{}
 		<-pollRespondedCh
@@ -339,7 +345,8 @@ func (s *WorkersTestSuite) TestErrorProneSlotSupplier() {
 	a := &greeterActivity{}
 	registry := newRegistry()
 	registry.addActivityWithLock(a.ActivityType().Name, a)
-	activityWorker := newActivityWorker(s.service, executionParameters, overrides, registry, nil)
+	client := WorkflowClient{workflowService: s.service}
+	activityWorker := newActivityWorker(&client, executionParameters, overrides, registry, nil)
 	_ = activityWorker.Start()
 	for i := 0; i < 25; i++ {
 		unblockPollCh <- struct{}{}
@@ -363,7 +370,8 @@ func (s *WorkersTestSuite) TestActivityWorker() {
 	a := &greeterActivity{}
 	registry := newRegistry()
 	registry.addActivityWithLock(a.ActivityType().Name, a)
-	activityWorker := newActivityWorker(s.service, executionParameters, overrides, registry, nil)
+	client := WorkflowClient{workflowService: s.service}
+	activityWorker := newActivityWorker(&client, executionParameters, overrides, registry, nil)
 	_ = activityWorker.Start()
 	activityWorker.Stop()
 }
@@ -379,7 +387,7 @@ func (s *WorkersTestSuite) TestActivityWorkerStop() {
 			RunId:      "rID",
 		},
 		ActivityType:           &commonpb.ActivityType{Name: "test"},
-		ActivityId:             uuid.New(),
+		ActivityId:             uuid.NewString(),
 		ScheduledTime:          timestamppb.New(now),
 		ScheduleToCloseTimeout: durationpb.New(1 * time.Second),
 		StartedTime:            timestamppb.New(now),
@@ -417,7 +425,8 @@ func (s *WorkersTestSuite) TestActivityWorkerStop() {
 	a := &greeterActivity{}
 	registry := newRegistry()
 	registry.addActivityWithLock(a.ActivityType().Name, a)
-	worker := newActivityWorker(s.service, executionParameters, overrides, registry, nil)
+	client := WorkflowClient{workflowService: s.service}
+	worker := newActivityWorker(&client, executionParameters, overrides, registry, nil)
 	_ = worker.Start()
 	_ = activityTaskHandler.BlockedOnExecuteCalled()
 	go worker.Stop()
@@ -434,6 +443,7 @@ func (s *WorkersTestSuite) TestActivityWorkerStop() {
 func (s *WorkersTestSuite) TestPollWorkflowTaskQueue_InternalServiceError() {
 	s.service.EXPECT().DescribeNamespace(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, nil)
 	s.service.EXPECT().PollWorkflowTaskQueue(gomock.Any(), gomock.Any(), gomock.Any()).Return(&workflowservice.PollWorkflowTaskQueueResponse{}, serviceerror.NewInternal("")).AnyTimes()
+	s.service.EXPECT().ShutdownWorker(gomock.Any(), gomock.Any(), gomock.Any()).Return(&workflowservice.ShutdownWorkerResponse{}, nil).Times(1)
 
 	executionParameters := workerExecutionParameters{
 		Namespace:                             DefaultNamespace,
@@ -442,7 +452,8 @@ func (s *WorkersTestSuite) TestPollWorkflowTaskQueue_InternalServiceError() {
 		Logger:                                ilog.NewNopLogger(),
 	}
 	overrides := &workerOverrides{workflowTaskHandler: newSampleWorkflowTaskHandler()}
-	workflowWorker := newWorkflowWorkerInternal(s.service, executionParameters, nil, overrides, newRegistry())
+	client := &WorkflowClient{workflowService: s.service}
+	workflowWorker := newWorkflowWorkerInternal(client, executionParameters, nil, overrides, newRegistry())
 	_ = workflowWorker.Start()
 	workflowWorker.Stop()
 }
@@ -559,6 +570,9 @@ func (s *WorkersTestSuite) TestLongRunningWorkflowTask() {
 			panic("unexpected RespondWorkflowTaskCompleted")
 		}
 	}).Times(2)
+
+	s.service.EXPECT().ShutdownWorker(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&workflowservice.ShutdownWorkerResponse{}, nil).Times(1)
 
 	clientOptions := ClientOptions{
 		Identity: "test-worker-identity",
@@ -689,6 +703,9 @@ func (s *WorkersTestSuite) TestMultipleLocalActivities() {
 		}
 	}).Times(1)
 
+	s.service.EXPECT().ShutdownWorker(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&workflowservice.ShutdownWorkerResponse{}, nil).Times(1)
+
 	clientOptions := ClientOptions{
 		Identity: "test-worker-identity",
 	}
@@ -720,10 +737,15 @@ func (s *WorkersTestSuite) TestWorkerMultipleStop() {
 		Return(&workflowservice.PollWorkflowTaskQueueResponse{}, nil).AnyTimes()
 	s.service.EXPECT().PollActivityTaskQueue(gomock.Any(), gomock.Any(), gomock.Any()).
 		Return(&workflowservice.PollActivityTaskQueueResponse{}, nil).AnyTimes()
+	s.service.EXPECT().ShutdownWorker(gomock.Any(), gomock.Any(), gomock.Any()).
+		Return(&workflowservice.ShutdownWorkerResponse{}, nil).Times(1)
+
 	client := NewServiceClient(s.service, nil, ClientOptions{Identity: "multi-stop-identity"})
 	worker := NewAggregatedWorker(client, "multi-stop-tq", WorkerOptions{})
 	s.NoError(worker.Start())
 	worker.Stop()
+	// Verify stopping the worker removes it from the eager dispatcher
+	s.Empty(client.eagerDispatcher.workersByTaskQueue["multi-stop-tq"])
 	worker.Stop()
 }
 

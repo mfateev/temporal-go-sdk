@@ -464,6 +464,53 @@ func (s *replayTestSuite) TestGogoprotoPayloadWorkflow() {
 	s.NoError(err)
 }
 
+func (s *replayTestSuite) TestSelectorBlockingDefault() {
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(SelectorBlockingDefaultWorkflow)
+	// Verify we can still replay an old workflow that does
+	// not have the SDKFlagBlockedSelectorSignalReceive flag
+	err := replayer.ReplayWorkflowHistoryFromJSONFile(ilog.NewDefaultLogger(), "selector-blocking-default.json")
+	s.NoError(err)
+	require.NoError(s.T(), err)
+}
+
+func (s *replayTestSuite) TestSelectorNonBlocking() {
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(SelectorBlockingDefaultWorkflow)
+	// Verify we can replay the new workflow that has the
+	// SDKFlagBlockedSelectorSignalReceive flag
+	err := replayer.ReplayWorkflowHistoryFromJSONFile(ilog.NewDefaultLogger(), "selector-non-blocking.json")
+	s.NoError(err)
+	require.NoError(s.T(), err)
+}
+
+func (s *replayTestSuite) TestPartialReplayNonCommandEvent() {
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(TripWorkflow)
+	// Verify we can replay partial history that has ended on a non-command event
+	err := replayer.ReplayWorkflowHistoryFromJSONFile(ilog.NewDefaultLogger(), "partial-replay-non-command-event.json")
+	s.NoError(err)
+	require.NoError(s.T(), err)
+}
+
+func (s *replayTestSuite) TestResetWorkflowBeforeChildInit() {
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(ResetWorkflowWithChild)
+	// Verify we can replay workflow history containing a reset before StartChildWorkflowExecutionInitiated & ChildWorkflowExecutionCompleted events.
+	err := replayer.ReplayWorkflowHistoryFromJSONFile(ilog.NewDefaultLogger(), "reset-workflow-before-child-init.json")
+	s.NoError(err)
+	require.NoError(s.T(), err)
+}
+
+func (s *replayTestSuite) TestResetWorkflowAfterChildComplete() {
+	replayer := worker.NewWorkflowReplayer()
+	replayer.RegisterWorkflow(ResetWorkflowWithChild)
+	// Verify we can replay workflow history containing a reset event after StartChildWorkflowExecutionInitiated & ChildWorkflowExecutionCompleted events.
+	err := replayer.ReplayWorkflowHistoryFromJSONFile(ilog.NewDefaultLogger(), "reset-workflow-after-child-complete.json")
+	s.NoError(err)
+	require.NoError(s.T(), err)
+}
+
 type captureConverter struct {
 	converter.DataConverter
 	toPayloads   []interface{}

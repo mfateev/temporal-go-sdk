@@ -39,11 +39,15 @@ import (
 
 type (
 	// ActivityType identifies an activity type.
+	//
+	// Exposed as: [go.temporal.io/sdk/activity.Type]
 	ActivityType struct {
 		Name string
 	}
 
 	// ActivityInfo contains information about a currently executing activity.
+	//
+	// Exposed as: [go.temporal.io/sdk/activity.Info]
 	ActivityInfo struct {
 		TaskToken         []byte
 		WorkflowType      *WorkflowType
@@ -61,6 +65,8 @@ type (
 	}
 
 	// RegisterActivityOptions consists of options for registering an activity.
+	//
+	// Exposed as: [go.temporal.io/sdk/activity.RegisterOptions]
 	RegisterActivityOptions struct {
 		// When an activity is a function the name is an actual activity type name.
 		// When an activity is part of a structure then each member of the structure becomes an activity with
@@ -81,8 +87,11 @@ type (
 	// ActivityOptions stores all activity-specific parameters that will be stored inside of a context.
 	// The current timeout resolution implementation is in seconds and uses math.Ceil(d.Seconds()) as the duration. But is
 	// subjected to change in the future.
+	//
+	// Exposed as: [go.temporal.io/sdk/workflow.ActivityOptions]
 	ActivityOptions struct {
 		// TaskQueue - Name of the task queue that the activity needs to be scheduled on.
+		//
 		// Optional: The default task queue with the same name as the workflow task queue.
 		TaskQueue string
 
@@ -99,6 +108,7 @@ type (
 		// better to rely on the default value.
 		// ScheduleToStartTimeout is always non-retryable. Retrying after this timeout doesn't make sense, as it would
 		// just put the Activity Task back into the same Task Queue.
+		//
 		// Optional: Defaults to unlimited.
 		ScheduleToStartTimeout time.Duration
 
@@ -116,11 +126,13 @@ type (
 
 		// WaitForCancellation - Whether to wait for canceled activity to be completed(
 		// activity can be failed, completed, cancel accepted)
+		//
 		// Optional: default false
 		WaitForCancellation bool
 
 		// ActivityID - Business level activity ID, this is not needed for most of the cases if you have
 		// to specify this then talk to the temporal team. This is something will be done in the future.
+		//
 		// Optional: default empty string
 		ActivityID string
 
@@ -128,10 +140,10 @@ type (
 		// More details are available at docs.temporal.io.
 		// RetryPolicy is optional. If one is not specified, a default RetryPolicy is provided by the server.
 		// The default RetryPolicy provided by the server specifies:
-		// - InitialInterval of 1 second
-		// - BackoffCoefficient of 2.0
-		// - MaximumInterval of 100 x InitialInterval
-		// - MaximumAttempts of 0 (unlimited)
+		//  - InitialInterval of 1 second
+		//  - BackoffCoefficient of 2.0
+		//  - MaximumInterval of 100 x InitialInterval
+		//  - MaximumAttempts of 0 (unlimited)
 		// To disable retries, set MaximumAttempts to 1.
 		// The default RetryPolicy provided by the server can be overridden by the dynamic config.
 		RetryPolicy *RetryPolicy
@@ -149,9 +161,19 @@ type (
 		// build ID or not. See temporal.VersioningIntent.
 		// WARNING: Worker versioning is currently experimental
 		VersioningIntent VersioningIntent
+
+		// Summary is a single-line summary for this activity that will appear in UI/CLI. This can be
+		// in single-line Temporal Markdown format.
+		//
+		// Optional: defaults to none/empty.
+		//
+		// NOTE: Experimental
+		Summary string
 	}
 
 	// LocalActivityOptions stores local activity specific parameters that will be stored inside of a context.
+	//
+	// Exposed as: [go.temporal.io/sdk/workflow.LocalActivityOptions]
 	LocalActivityOptions struct {
 		// ScheduleToCloseTimeout - The end to end timeout for the local activity, including retries.
 		// At least one of ScheduleToCloseTimeout or StartToCloseTimeout is required.
@@ -164,6 +186,7 @@ type (
 		StartToCloseTimeout time.Duration
 
 		// RetryPolicy - Specify how to retry activity if error happens.
+		//
 		// Optional: default is to retry according to the default retry policy up to ScheduleToCloseTimeout
 		// with 1sec initial delay between retries and 2x backoff.
 		RetryPolicy *RetryPolicy
@@ -171,16 +194,22 @@ type (
 )
 
 // GetActivityInfo returns information about the currently executing activity.
+//
+// Exposed as: [go.temporal.io/sdk/activity.GetInfo]
 func GetActivityInfo(ctx context.Context) ActivityInfo {
 	return getActivityOutboundInterceptor(ctx).GetInfo(ctx)
 }
 
 // HasHeartbeatDetails checks if there are heartbeat details from last attempt.
+//
+// Exposed as: [go.temporal.io/sdk/activity.HasHeartbeatDetails]
 func HasHeartbeatDetails(ctx context.Context) bool {
 	return getActivityOutboundInterceptor(ctx).HasHeartbeatDetails(ctx)
 }
 
 // IsActivity checks if the context is an activity context from a normal or local activity.
+//
+// Exposed as: [go.temporal.io/sdk/activity.IsActivity]
 func IsActivity(ctx context.Context) bool {
 	a := ctx.Value(activityInterceptorContextKey)
 	return a != nil
@@ -194,16 +223,22 @@ func IsActivity(ctx context.Context) bool {
 //
 // Note: Values should not be reused for extraction here because merging on top
 // of existing values may result in unexpected behavior similar to json.Unmarshal.
+//
+// Exposed as: [go.temporal.io/sdk/activity.GetHeartbeatDetails]
 func GetHeartbeatDetails(ctx context.Context, d ...interface{}) error {
 	return getActivityOutboundInterceptor(ctx).GetHeartbeatDetails(ctx, d...)
 }
 
 // GetActivityLogger returns a logger that can be used in the activity.
+//
+// Exposed as: [go.temporal.io/sdk/activity.GetLogger]
 func GetActivityLogger(ctx context.Context) log.Logger {
 	return getActivityOutboundInterceptor(ctx).GetLogger(ctx)
 }
 
 // GetActivityMetricsHandler returns a metrics handler that can be used in the activity.
+//
+// Exposed as: [go.temporal.io/sdk/activity.GetMetricsHandler]
 func GetActivityMetricsHandler(ctx context.Context) metrics.Handler {
 	return getActivityOutboundInterceptor(ctx).GetMetricsHandler(ctx)
 }
@@ -212,6 +247,8 @@ func GetActivityMetricsHandler(ctx context.Context) metrics.Handler {
 // When the worker is stopping, it will close this channel and wait until the worker stop timeout finishes. After the timeout
 // hits, the worker will cancel the activity context and then exit. The timeout can be defined by worker option: WorkerStopTimeout.
 // Use this channel to handle a graceful activity exit when the activity worker stops.
+//
+// Exposed as: [go.temporal.io/sdk/activity.GetWorkerStopChannel]
 func GetWorkerStopChannel(ctx context.Context) <-chan struct{} {
 	return getActivityOutboundInterceptor(ctx).GetWorkerStopChannel(ctx)
 }
@@ -226,8 +263,18 @@ func GetWorkerStopChannel(ctx context.Context) <-chan struct{} {
 //
 // details - The details that you provided here can be seen in the workflow when it receives TimeoutError. You
 // can check error TimeoutType()/Details().
+//
+// Exposed as: [go.temporal.io/sdk/activity.RecordHeartbeat]
 func RecordActivityHeartbeat(ctx context.Context, details ...interface{}) {
 	getActivityOutboundInterceptor(ctx).RecordHeartbeat(ctx, details...)
+}
+
+// GetClient returns a client that can be used to interact with the Temporal
+// service from an activity.
+//
+// Exposed as: [go.temporal.io/sdk/activity.GetClient]
+func GetClient(ctx context.Context) Client {
+	return getActivityOutboundInterceptor(ctx).GetClient(ctx)
 }
 
 // ServiceInvoker abstracts calls to the Temporal service from an activity implementation.
@@ -252,6 +299,7 @@ func WithActivityTask(
 	workerStopChannel <-chan struct{},
 	contextPropagators []ContextPropagator,
 	interceptors []WorkerInterceptor,
+	client *WorkflowClient,
 ) (context.Context, error) {
 	scheduled := task.GetScheduledTime().AsTime()
 	started := task.GetStartedTime().AsTime()
@@ -293,6 +341,7 @@ func WithActivityTask(
 		workflowNamespace:  task.WorkflowNamespace,
 		workerStopChannel:  workerStopChannel,
 		contextPropagators: contextPropagators,
+		client:             client,
 	})
 }
 
@@ -304,6 +353,7 @@ func WithLocalActivityTask(
 	metricsHandler metrics.Handler,
 	dataConverter converter.DataConverter,
 	interceptors []WorkerInterceptor,
+	client *WorkflowClient,
 ) (context.Context, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -349,6 +399,7 @@ func WithLocalActivityTask(
 		startedTime:       startedTime,
 		dataConverter:     dataConverter,
 		attempt:           task.attempt,
+		client:            client,
 	})
 }
 

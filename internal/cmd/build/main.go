@@ -89,7 +89,7 @@ func (b *builder) run() error {
 
 func (b *builder) check() error {
 	// Run go vet
-	if err := b.runCmd(b.cmdFromRoot("go", "vet", "-tags", "protolegacy", "./...")); err != nil {
+	if err := b.runCmd(b.cmdFromRoot("go", "vet", "./...")); err != nil {
 		return fmt.Errorf("go vet failed: %w", err)
 	}
 	// Run errcheck
@@ -106,6 +106,10 @@ func (b *builder) check() error {
 	}
 	// Run copyright check
 	if err := b.runCmd(b.cmdFromRoot("go", "run", "./internal/cmd/tools/copyright/licensegen.go", "--verifyOnly")); err != nil {
+		return fmt.Errorf("copyright check failed: %w", err)
+	}
+	// Run doclink check
+	if err := b.runCmd(b.cmdFromRoot("go", "run", "./internal/cmd/tools/doclink/doclink.go")); err != nil {
 		return fmt.Errorf("copyright check failed: %w", err)
 	}
 	return nil
@@ -140,10 +144,6 @@ func (b *builder) integrationTest() error {
 				HostPort:  "127.0.0.1:7233",
 				Namespace: "integration-test-namespace",
 			},
-			// TODO(bergundy): Remove this override after server 1.25.0 is released.
-			CachedDownload: testsuite.CachedDownload{
-				Version: "v0.14.0-nexus.0",
-			},
 			LogLevel: "warn",
 			ExtraArgs: []string{
 				"--dynamic-config-value", "frontend.enableExecuteMultiOperation=true",
@@ -157,11 +157,13 @@ func (b *builder) integrationTest() error {
 				"--dynamic-config-value", "system.forceSearchAttributesCacheRefreshOnRead=true",
 				"--dynamic-config-value", "worker.buildIdScavengerEnabled=true",
 				"--dynamic-config-value", "worker.removableBuildIdDurationSinceDefault=1",
-				// All of the below is required for Nexus tests.
-				"--http-port", "7243",
-				"--dynamic-config-value", "system.enableNexus=true",
-				// SDK tests use arbitrary callback URLs, permit that on the server.
-				"--dynamic-config-value", `component.callbacks.allowedAddresses=[{"Pattern":"*","AllowInsecure":true}]`,
+				"--dynamic-config-value", "system.enableDeployments=true",
+				"--dynamic-config-value", "system.enableDeploymentVersions=true",
+				"--dynamic-config-value", "matching.wv.VersionDrainageStatusVisibilityGracePeriod=10",
+				"--dynamic-config-value", "matching.wv.VersionDrainageStatusRefreshInterval=1",
+				"--http-port", "7243", // Nexus tests use the HTTP port directly
+				"--dynamic-config-value", `component.callbacks.allowedAddresses=[{"Pattern":"*","AllowInsecure":true}]`, // SDK tests use arbitrary callback URLs, permit that on the server
+				"--dynamic-config-value", `system.refreshNexusEndpointsMinWait="0s"`, // Make Nexus tests faster
 			},
 		})
 		if err != nil {
@@ -171,7 +173,7 @@ func (b *builder) integrationTest() error {
 	}
 
 	// Run integration test
-	args := []string{"go", "test", "-tags", "protolegacy", "-count", "1", "-race", "-v", "-timeout", "10m"}
+	args := []string{"go", "test", "-count", "1", "-race", "-v", "-timeout", "15m"}
 	if *runFlag != "" {
 		args = append(args, "-run", *runFlag)
 	}
@@ -267,7 +269,7 @@ func (b *builder) unitTest() error {
 	log.Printf("Running unit tests in dirs: %v", testDirs)
 	for _, testDir := range testDirs {
 		// Run unit test
-		args := []string{"go", "test", "-tags", "protolegacy", "-count", "1", "-race", "-v", "-timeout", "15m"}
+		args := []string{"go", "test", "-count", "1", "-race", "-v", "-timeout", "15m"}
 		if *runFlag != "" {
 			args = append(args, "-run", *runFlag)
 		}

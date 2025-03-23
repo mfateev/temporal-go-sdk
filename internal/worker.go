@@ -26,16 +26,65 @@ package internal
 
 import (
 	"context"
+	"strings"
 	"time"
+
+	deploymentpb "go.temporal.io/api/deployment/v1"
+	enumspb "go.temporal.io/api/enums/v1"
 )
 
 type (
+	// WorkerDeploymentOptions provides configuration for Worker Deployment Versioning.
+	//
+	// NOTE: Both [WorkerDeploymentOptions.Version] and [WorkerDeploymentOptions.UseVersioning]
+	// need to be set for enabling Worker Deployment Versioning.
+	//
+	// NOTE: Experimental
+	//
+	// Exposed as: [go.temporal.io/sdk/worker.DeploymentOptions]
+	WorkerDeploymentOptions struct {
+		// If set, opts this worker into the Worker Deployment Versioning feature. It will only
+		// operate on workflows it claims to be compatible with. You must set [Version] if this flag
+		// is true.
+		//
+		// NOTE: Experimental
+		//
+		// NOTE: Cannot be enabled at the same time as [WorkerOptions.EnableSessionWorker]
+		UseVersioning bool
+
+		// Assign a Deployment Version identifier to this worker. The format of this identifier
+		// is "<deployment_name>.<build_id>". If [Version] is set both [WorkerOptions.BuildID] and
+		// [DeploymentSeriesName] will be ignored.
+		//
+		// NOTE: Experimental
+		Version string
+
+		// Assign a deployment series name to this worker. Different versions of the same worker
+		// service/application are linked together by sharing a series name.
+		//
+		// Deprecated: Use [Version].
+		DeploymentSeriesName string
+
+		// Optional: Provides a default Versioning Behavior to workflows that do not set one with the
+		// registration option [RegisterWorkflowOptions.VersioningBehavior].
+		//
+		// NOTE: When the new Deployment-based Worker Versioning feature is on,
+		// and [DefaultVersioningBehavior] is unspecified,
+		// workflows that do not set the Versioning Behavior will fail at registration time.
+		//
+		// NOTE: Experimental
+		DefaultVersioningBehavior VersioningBehavior
+	}
+
 	// WorkerOptions is used to configure a worker instance.
 	// The current timeout resolution implementation is in seconds and uses math.Ceil(d.Seconds()) as the duration. But is
 	// subjected to change in the future.
+	//
+	// Exposed as: [go.temporal.io/sdk/worker.Options]
 	WorkerOptions struct {
 		// Optional: To set the maximum concurrent activity executions this worker can have.
 		// The zero value of this uses the default value.
+		//
 		// default: defaultMaxConcurrentActivityExecutionSize(1k)
 		MaxConcurrentActivityExecutionSize int
 
@@ -45,11 +94,13 @@ type (
 		// 1 if needed. For example, set the number to 0.1 means you want your activity to be executed
 		// once for every 10 seconds. This can be used to protect down stream services from flooding.
 		// The zero value of this uses the default value
+		//
 		// default: 100k
 		WorkerActivitiesPerSecond float64
 
 		// Optional: To set the maximum concurrent local activity executions this worker can have.
 		// The zero value of this uses the default value.
+		//
 		// default: 1k
 		MaxConcurrentLocalActivityExecutionSize int
 
@@ -59,6 +110,7 @@ type (
 		// 1 if needed. For example, set the number to 0.1 means you want your local activity to be executed
 		// once for every 10 seconds. This can be used to protect down stream services from flooding.
 		// The zero value of this uses the default value
+		//
 		// default: 100k
 		WorkerLocalActivitiesPerSecond float64
 
@@ -69,14 +121,16 @@ type (
 		// 1 if needed. For example, set the number to 0.1 means you want your activity to be executed
 		// once for every 10 seconds. This can be used to protect down stream services from flooding.
 		// The zero value of this uses the default value.
+		//
 		// default: 100k
 		//
-		// Note: Setting this to a non zero value will also disable eager activities.
+		// NOTE: Setting this to a non zero value will also disable eager activities.
 		TaskQueueActivitiesPerSecond float64
 
 		// Optional: Sets the maximum number of goroutines that will concurrently poll the
 		// temporal-server to retrieve activity tasks. Changing this value will affect the
 		// rate at which the worker is able to consume tasks from a task queue.
+		//
 		// default: 2
 		MaxConcurrentActivityTaskPollers int
 
@@ -84,6 +138,7 @@ type (
 		// The zero value of this uses the default value. Due to internal logic where pollers
 		// alternate between stick and non-sticky queues, this
 		// value cannot be 1 and will panic if set to that value.
+		//
 		// default: defaultMaxConcurrentTaskExecutionSize(1k)
 		MaxConcurrentWorkflowTaskExecutionSize int
 
@@ -92,17 +147,20 @@ type (
 		// rate at which the worker is able to consume tasks from a task queue. Due to
 		// internal logic where pollers alternate between stick and non-sticky queues, this
 		// value cannot be 1 and will panic if set to that value.
+		//
 		// default: 2
 		MaxConcurrentWorkflowTaskPollers int
 
 		// Optional: Sets the maximum concurrent nexus task executions this worker can have.
 		// The zero value of this uses the default value.
+		//
 		// default: defaultMaxConcurrentTaskExecutionSize(1k)
 		MaxConcurrentNexusTaskExecutionSize int
 
 		// Optional: Sets the maximum number of goroutines that will concurrently poll the
 		// temporal-server to retrieve nexus tasks. Changing this value will affect the
 		// rate at which the worker is able to consume tasks from a task queue.
+		//
 		// default: 2
 		MaxConcurrentNexusTaskPollers int
 
@@ -110,6 +168,7 @@ type (
 		// In the workflow code you can use workflow.GetLogger(ctx) to write logs. By default, the logger will skip log
 		// entry during replay mode so you won't see duplicate logs. This option will enable the logging in replay mode.
 		// This is only useful for debugging purpose.
+		//
 		// default: false
 		EnableLoggingInReplay bool
 
@@ -136,20 +195,24 @@ type (
 		// Optional: Sets how workflow worker deals with non-deterministic history events
 		// (presumably arising from non-deterministic workflow definitions or non-backward compatible workflow
 		// definition changes) and other panics raised from workflow code.
+		//
 		// default: BlockWorkflow, which just logs error but doesn't fail workflow.
 		WorkflowPanicPolicy WorkflowPanicPolicy
 
 		// Optional: worker graceful stop timeout
+		//
 		// default: 0s
 		WorkerStopTimeout time.Duration
 
 		// Optional: Enable running session workers.
 		// Session workers is for activities within a session.
 		// Enable this option to allow worker to process sessions.
+		//
 		// default: false
 		EnableSessionWorker bool
 
 		// Optional: Sets the maximum number of concurrently running sessions the resource supports.
+		//
 		// default: 1000
 		MaxConcurrentSessionExecutionSize int
 
@@ -172,15 +235,18 @@ type (
 		// Optional: If set to true, a workflow worker is not started for this
 		// worker and workflows cannot be registered with this worker. Use this if
 		// you only want your worker to execute activities.
+		//
 		// default: false
 		DisableWorkflowWorker bool
 
 		// Optional: If set to true worker will only handle workflow tasks and local activities.
 		// Non-local activities will not be executed by this worker.
+		//
 		// default: false
 		LocalActivityWorkerOnly bool
 
 		// Optional: If set overwrites the client level Identity value.
+		//
 		// default: client identity
 		Identity string
 
@@ -190,12 +256,14 @@ type (
 		// Optional: The maximum amount of time between sending each pending heartbeat to the server. Regardless of
 		// heartbeat timeout, no pending heartbeat will wait longer than this amount of time to send. To effectively disable
 		// heartbeat throttling, this can be set to something like 1 nanosecond, but it is not recommended.
+		//
 		// default: 60 seconds
 		MaxHeartbeatThrottleInterval time.Duration
 
 		// Optional: The default amount of time between sending each pending heartbeat to the server. This is used if the
 		// ActivityOptions do not provide a HeartbeatTimeout. Otherwise, the interval becomes a value a bit smaller than the
 		// given HeartbeatTimeout.
+		//
 		// default: 30 seconds
 		DefaultHeartbeatThrottleInterval time.Duration
 
@@ -219,7 +287,7 @@ type (
 		// activities directly from the workflow task back to this worker which is
 		// faster than non-eager which may be dispatched to a separate worker.
 		//
-		// Note: Eager activities will automatically be disabled if TaskQueueActivitiesPerSecond is set.
+		// NOTE: Eager activities will automatically be disabled if TaskQueueActivitiesPerSecond is set.
 		DisableEagerActivities bool
 
 		// Optional: Maximum number of eager activities that can be running.
@@ -250,20 +318,30 @@ type (
 
 		// Assign a BuildID to this worker. This replaces the deprecated binary checksum concept,
 		// and is used to provide a unique identifier for a set of worker code, and is necessary
-		// to opt in to the Worker Versioning feature. See UseBuildIDForVersioning.
-		// NOTE: Experimental
+		// to opt in to the Worker Versioning feature. See [UseBuildIDForVersioning].
+		//
+		// Deprecated: Use [WorkerDeploymentOptions.Version]
 		BuildID string
 
-		// Optional: If set, opts this worker into the Worker Versioning feature. It will only
+		// If set, opts this worker into the Worker Versioning feature. It will only
 		// operate on workflows it claims to be compatible with. You must set BuildID if this flag
 		// is true.
-		// NOTE: Experimental
-		// Note: Cannot be enabled at the same time as EnableSessionWorker
+		//
+		// Deprecated: Use [WorkerDeploymentOptions.UseVersioning]
+		//
+		// NOTE: Cannot be enabled at the same time as [WorkerOptions.EnableSessionWorker]
 		UseBuildIDForVersioning bool
+
+		// Optional: If set it configures Worker Versioning for this worker. See [WorkerDeploymentOptions]
+		// for more.
+		//
+		// NOTE: Experimental
+		DeploymentOptions WorkerDeploymentOptions
 
 		// Optional: If set, use a custom tuner for this worker. See WorkerTuner for more.
 		// Mutually exclusive with MaxConcurrentWorkflowTaskExecutionSize,
 		// MaxConcurrentActivityExecutionSize, and MaxConcurrentLocalActivityExecutionSize.
+		//
 		// NOTE: Experimental
 		Tuner WorkerTuner
 	}
@@ -273,6 +351,8 @@ type (
 // code panicking which includes non backwards compatible changes to the workflow code without appropriate
 // versioning (see workflow.GetVersion).
 // The default behavior is to block workflow execution until the problem is fixed.
+//
+// Exposed as: [go.temporal.io/sdk/worker.WorkflowPanicPolicy]
 type WorkflowPanicPolicy int
 
 const (
@@ -280,10 +360,14 @@ const (
 	// This option causes workflow to get stuck in the workflow task retry loop.
 	// It is expected that after the problem is discovered and fixed the workflows are going to continue
 	// without any additional manual intervention.
+	//
+	// Exposed as: [go.temporal.io/sdk/worker.BlockWorkflow]
 	BlockWorkflow WorkflowPanicPolicy = iota
 	// FailWorkflow immediately fails workflow execution if workflow code throws panic or detects non-determinism.
 	// This feature is convenient during development.
 	// WARNING: enabling this in production can cause all open workflows to fail on a single bug or bad deployment.
+	//
+	// Exposed as: [go.temporal.io/sdk/worker.FailWorkflow]
 	FailWorkflow
 )
 
@@ -302,6 +386,8 @@ func IsReplayNamespace(dn string) bool {
 // hosted by a single worker process.
 //
 // options 	- configure any worker specific options.
+//
+// Exposed as: [go.temporal.io/sdk/worker.New]
 func NewWorker(
 	client Client,
 	taskQueue string,
@@ -312,4 +398,25 @@ func NewWorker(
 		panic("Client must be created with client.Dial() or client.NewLazyClient()")
 	}
 	return NewAggregatedWorker(workflowClient, taskQueue, options)
+}
+
+func workerDeploymentOptionsToProto(useVersioning bool, version string) *deploymentpb.WorkerDeploymentOptions {
+	if version != "" {
+		splitVersion := strings.SplitN(version, ".", 2)
+		if len(splitVersion) != 2 {
+			panic("invalid format for worker deployment version, not \"<deployment_name>.<build_id>\"")
+		}
+		var workerVersioningMode enumspb.WorkerVersioningMode
+		if useVersioning {
+			workerVersioningMode = enumspb.WORKER_VERSIONING_MODE_VERSIONED
+		} else {
+			workerVersioningMode = enumspb.WORKER_VERSIONING_MODE_UNVERSIONED
+		}
+		return &deploymentpb.WorkerDeploymentOptions{
+			DeploymentName:       splitVersion[0],
+			BuildId:              splitVersion[1],
+			WorkerVersioningMode: workerVersioningMode,
+		}
+	}
+	return nil
 }

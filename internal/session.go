@@ -32,7 +32,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 
 	"go.temporal.io/sdk/internal/common/backoff"
 )
@@ -43,6 +43,8 @@ type (
 	// SessionID is a uuid generated when CreateSession() or RecreateSession()
 	// is called and can be used to uniquely identify a session.
 	// HostName specifies which host is executing the session
+	//
+	// Exposed as: [go.temporal.io/sdk/workflow.SessionInfo]
 	SessionInfo struct {
 		SessionID         string
 		HostName          string
@@ -66,6 +68,8 @@ type (
 	//     By default, the session is not reestablished.
 	//     The session is reestablished only if the worker set worker.Options.SessionResourceID to the same value
 	//     that was used to establish the original session.
+	//
+	// Exposed as: [go.temporal.io/sdk/workflow.SessionOptions]
 	SessionOptions struct {
 		ExecutionTimeout   time.Duration
 		CreationTimeout    time.Duration
@@ -112,8 +116,14 @@ type (
 
 // Session State enum
 const (
+	//
+	// Exposed as: [go.temporal.io/sdk/workflow.SessionStateOpen]
 	SessionStateOpen SessionState = iota
+	//
+	// Exposed as: [go.temporal.io/sdk/workflow.SessionStateFailed]
 	SessionStateFailed
+	//
+	// Exposed as: [go.temporal.io/sdk/workflow.SessionStateClosed]
 	SessionStateClosed
 )
 
@@ -133,6 +143,8 @@ const (
 var (
 	// ErrSessionFailed is the error returned when user tries to execute an activity but the
 	// session it belongs to has already failed
+	//
+	// Exposed as: [go.temporal.io/sdk/workflow.ErrSessionFailed]
 	ErrSessionFailed            = errors.New("session has failed")
 	errFoundExistingOpenSession = errors.New("found exisiting open session in the context")
 )
@@ -189,6 +201,8 @@ var (
 //	       // Handle activity error
 //	   }
 //	   ... // execute more activities using sessionCtx
+//
+// Exposed as: [go.temporal.io/sdk/workflow.CreateSession]
 func CreateSession(ctx Context, sessionOptions *SessionOptions) (Context, error) {
 	options := getActivityOptions(ctx)
 	baseTaskQueue := options.TaskQueueName
@@ -206,6 +220,8 @@ func CreateSession(ctx Context, sessionOptions *SessionOptions) (Context, error)
 // The main usage of RecreateSession is for long sessions that are split into multiple runs. At the end of
 // one run, complete the current session, get recreateToken from sessionInfo by calling SessionInfo.GetRecreateToken()
 // and pass the token to the next run. In the new run, session can be recreated using that token.
+//
+// Exposed as: [go.temporal.io/sdk/workflow.RecreateSession]
 func RecreateSession(ctx Context, recreateToken []byte, sessionOptions *SessionOptions) (Context, error) {
 	recreateParams, err := deserializeRecreateToken(recreateToken)
 	if err != nil {
@@ -221,6 +237,8 @@ func RecreateSession(ctx Context, recreateToken []byte, sessionOptions *SessionO
 // After a session has completed, user can continue to use the context, but the activities will be scheduled
 // on the normal taskQueue (as user specified in ActivityOptions) and may be picked up by another worker since
 // it's not in a session.
+//
+// Exposed as: [go.temporal.io/sdk/workflow.CompleteSession]
 func CompleteSession(ctx Context) {
 	sessionInfo := getSessionInfo(ctx)
 	if sessionInfo == nil || sessionInfo.SessionState != SessionStateOpen {
@@ -256,6 +274,8 @@ func CompleteSession(ctx Context) {
 // session has failed, and created a new one on it), the most recent sessionInfo will be returned.
 //
 // This API will return nil if there's no sessionInfo in the context.
+//
+// Exposed as: [go.temporal.io/sdk/workflow.GetSessionInfo]
 func GetSessionInfo(ctx Context) *SessionInfo {
 	info := getSessionInfo(ctx)
 	if info == nil {
@@ -383,7 +403,7 @@ func createSession(ctx Context, creationTaskQueue string, options *SessionOption
 func generateSessionID(ctx Context) (string, error) {
 	var sessionID string
 	err := SideEffect(ctx, func(ctx Context) interface{} {
-		return uuid.New()
+		return uuid.NewString()
 	}).Get(&sessionID)
 	return sessionID, err
 }

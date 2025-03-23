@@ -37,6 +37,8 @@ import (
 // WorkerTuner allows for the dynamic customization of some aspects of worker behavior.
 //
 // WARNING: Custom implementations of SlotSupplier are currently experimental.
+//
+// Exposed as: [go.temporal.io/sdk/worker.WorkerTuner]
 type WorkerTuner interface {
 	// GetWorkflowTaskSlotSupplier returns the SlotSupplier used for workflow tasks.
 	GetWorkflowTaskSlotSupplier() SlotSupplier
@@ -46,11 +48,15 @@ type WorkerTuner interface {
 	GetLocalActivitySlotSupplier() SlotSupplier
 	// GetNexusSlotSupplier returns the SlotSupplier used for nexus tasks.
 	GetNexusSlotSupplier() SlotSupplier
+	// GetSessionActivitySlotSupplier returns the SlotSupplier used for activities within sessions.
+	GetSessionActivitySlotSupplier() SlotSupplier
 }
 
 // SlotPermit is a permit to use a slot.
 //
 // WARNING: Custom implementations of SlotSupplier are currently experimental.
+//
+// Exposed as: [go.temporal.io/sdk/worker.SlotPermit]
 type SlotPermit struct {
 	// UserData is a field that can be used to store arbitrary on a permit by SlotSupplier
 	// implementations.
@@ -62,6 +68,8 @@ type SlotPermit struct {
 
 // SlotReservationInfo contains information that SlotSupplier instances can use during
 // reservation calls. It embeds a standard Context.
+//
+// Exposed as: [go.temporal.io/sdk/worker.SlotReservationInfo]
 type SlotReservationInfo interface {
 	// TaskQueue returns the task queue for which a slot is being reserved. In the case of local
 	// activities, this is the same as the workflow's task queue.
@@ -70,7 +78,8 @@ type SlotReservationInfo interface {
 	WorkerBuildId() string
 	// WorkerBuildId returns the build ID of the worker that is reserving the slot.
 	WorkerIdentity() string
-	// NumIssuedSlots returns the number of slots that have already been issued by the supplier.
+	// NumIssuedSlots returns the current number of slots that have already been issued by the
+	// supplier. This value may change over the course of the reservation.
 	NumIssuedSlots() int
 	// Logger returns an appropriately tagged logger.
 	Logger() log.Logger
@@ -81,6 +90,8 @@ type SlotReservationInfo interface {
 
 // SlotMarkUsedInfo contains information that SlotSupplier instances can use during
 // SlotSupplier.MarkSlotUsed calls.
+//
+// Exposed as: [go.temporal.io/sdk/worker.SlotMarkUsedInfo]
 type SlotMarkUsedInfo interface {
 	// Permit returns the permit that is being marked as used.
 	Permit() *SlotPermit
@@ -101,6 +112,8 @@ const (
 
 // SlotReleaseInfo contains information that SlotSupplier instances can use during
 // SlotSupplier.ReleaseSlot calls.
+//
+// Exposed as: [go.temporal.io/sdk/worker.SlotReleaseInfo]
 type SlotReleaseInfo interface {
 	// Permit returns the permit that is being released.
 	Permit() *SlotPermit
@@ -117,6 +130,8 @@ type SlotReleaseInfo interface {
 // local activities when used in conjunction with a WorkerTuner.
 //
 // WARNING: Custom implementations of SlotSupplier are currently experimental.
+//
+// Exposed as: [go.temporal.io/sdk/worker.SlotSupplier]
 type SlotSupplier interface {
 	// ReserveSlot is called before polling for new tasks. The implementation should block until
 	// a slot is available, then return a permit to use that slot. Implementations must be
@@ -150,10 +165,11 @@ type SlotSupplier interface {
 //
 // WARNING: Custom implementations of SlotSupplier are currently experimental.
 type CompositeTuner struct {
-	workflowSlotSupplier      SlotSupplier
-	activitySlotSupplier      SlotSupplier
-	localActivitySlotSupplier SlotSupplier
-	nexusSlotSupplier         SlotSupplier
+	workflowSlotSupplier        SlotSupplier
+	activitySlotSupplier        SlotSupplier
+	localActivitySlotSupplier   SlotSupplier
+	nexusSlotSupplier           SlotSupplier
+	sessionActivitySlotSupplier SlotSupplier
 }
 
 func (c *CompositeTuner) GetWorkflowTaskSlotSupplier() SlotSupplier {
@@ -168,8 +184,13 @@ func (c *CompositeTuner) GetLocalActivitySlotSupplier() SlotSupplier {
 func (c *CompositeTuner) GetNexusSlotSupplier() SlotSupplier {
 	return c.nexusSlotSupplier
 }
+func (c *CompositeTuner) GetSessionActivitySlotSupplier() SlotSupplier {
+	return c.sessionActivitySlotSupplier
+}
 
 // CompositeTunerOptions are the options used by NewCompositeTuner.
+//
+// Exposed as: [go.temporal.io/sdk/worker.CompositeTunerOptions]
 type CompositeTunerOptions struct {
 	// WorkflowSlotSupplier is the SlotSupplier used for workflow tasks.
 	WorkflowSlotSupplier SlotSupplier
@@ -179,21 +200,28 @@ type CompositeTunerOptions struct {
 	LocalActivitySlotSupplier SlotSupplier
 	// NexusSlotSupplier is the SlotSupplier used for nexus tasks.
 	NexusSlotSupplier SlotSupplier
+	// SessionActivitySlotSupplier is the SlotSupplier used for activities within sessions.
+	SessionActivitySlotSupplier SlotSupplier
 }
 
 // NewCompositeTuner creates a WorkerTuner that uses a combination of slot suppliers.
 //
 // WARNING: Custom implementations of SlotSupplier are currently experimental.
+//
+// Exposed as: [go.temporal.io/sdk/worker.NewCompositeTuner]
 func NewCompositeTuner(options CompositeTunerOptions) (WorkerTuner, error) {
 	return &CompositeTuner{
-		workflowSlotSupplier:      options.WorkflowSlotSupplier,
-		activitySlotSupplier:      options.ActivitySlotSupplier,
-		localActivitySlotSupplier: options.LocalActivitySlotSupplier,
-		nexusSlotSupplier:         options.NexusSlotSupplier,
+		workflowSlotSupplier:        options.WorkflowSlotSupplier,
+		activitySlotSupplier:        options.ActivitySlotSupplier,
+		localActivitySlotSupplier:   options.LocalActivitySlotSupplier,
+		nexusSlotSupplier:           options.NexusSlotSupplier,
+		sessionActivitySlotSupplier: options.SessionActivitySlotSupplier,
 	}, nil
 }
 
 // FixedSizeTunerOptions are the options used by NewFixedSizeTuner.
+//
+// Exposed as: [go.temporal.io/sdk/worker.FixedSizeTunerOptions]
 type FixedSizeTunerOptions struct {
 	// NumWorkflowSlots is the number of slots available for workflow tasks.
 	NumWorkflowSlots int
@@ -206,6 +234,8 @@ type FixedSizeTunerOptions struct {
 }
 
 // NewFixedSizeTuner creates a WorkerTuner that uses fixed size slot suppliers.
+//
+// Exposed as: [go.temporal.io/sdk/worker.NewFixedSizeTuner]
 func NewFixedSizeTuner(options FixedSizeTunerOptions) (WorkerTuner, error) {
 	if options.NumWorkflowSlots <= 0 {
 		options.NumWorkflowSlots = defaultMaxConcurrentTaskExecutionSize
@@ -235,11 +265,16 @@ func NewFixedSizeTuner(options FixedSizeTunerOptions) (WorkerTuner, error) {
 	if err != nil {
 		return nil, err
 	}
+	sessSS, err := NewFixedSizeSlotSupplier(options.NumActivitySlots)
+	if err != nil {
+		return nil, err
+	}
 	return &CompositeTuner{
-		workflowSlotSupplier:      wfSS,
-		activitySlotSupplier:      actSS,
-		localActivitySlotSupplier: laSS,
-		nexusSlotSupplier:         nexusSS,
+		workflowSlotSupplier:        wfSS,
+		activitySlotSupplier:        actSS,
+		localActivitySlotSupplier:   laSS,
+		nexusSlotSupplier:           nexusSS,
+		sessionActivitySlotSupplier: sessSS,
 	}, nil
 }
 
@@ -251,6 +286,8 @@ type FixedSizeSlotSupplier struct {
 }
 
 // NewFixedSizeSlotSupplier creates a new FixedSizeSlotSupplier with the given number of slots.
+//
+// Exposed as: [go.temporal.io/sdk/worker.NewFixedSizeSlotSupplier]
 func NewFixedSizeSlotSupplier(numSlots int) (*FixedSizeSlotSupplier, error) {
 	if numSlots <= 0 {
 		return nil, fmt.Errorf("NumSlots must be positive")
@@ -292,7 +329,7 @@ type slotReserveInfoImpl struct {
 	taskQueue      string
 	workerBuildId  string
 	workerIdentity string
-	issuedSlots    int
+	issuedSlots    *atomic.Int32
 	logger         log.Logger
 	metrics        metrics.Handler
 }
@@ -310,7 +347,7 @@ func (s slotReserveInfoImpl) WorkerIdentity() string {
 }
 
 func (s slotReserveInfoImpl) NumIssuedSlots() int {
-	return s.issuedSlots
+	return int(s.issuedSlots.Load())
 }
 
 func (s slotReserveInfoImpl) Logger() log.Logger {
@@ -406,7 +443,7 @@ func (t *trackingSlotSupplier) ReserveSlot(
 		taskQueue:      data.taskQueue,
 		workerBuildId:  t.workerBuildId,
 		workerIdentity: t.workerIdentity,
-		issuedSlots:    int(t.issuedSlotsAtomic.Load()),
+		issuedSlots:    &t.issuedSlotsAtomic,
 		logger:         t.logger,
 		metrics:        t.metrics,
 	})
@@ -417,7 +454,10 @@ func (t *trackingSlotSupplier) ReserveSlot(
 		return nil, fmt.Errorf("slot supplier returned nil permit")
 	}
 	t.issuedSlotsAtomic.Add(1)
-	t.publishMetrics(false)
+	t.slotsMutex.Lock()
+	usedSlots := len(t.usedSlots)
+	t.slotsMutex.Unlock()
+	t.publishMetrics(usedSlots)
 	return permit, nil
 }
 
@@ -426,13 +466,16 @@ func (t *trackingSlotSupplier) TryReserveSlot(data *slotReservationData) *SlotPe
 		taskQueue:      data.taskQueue,
 		workerBuildId:  t.workerBuildId,
 		workerIdentity: t.workerIdentity,
-		issuedSlots:    int(t.issuedSlotsAtomic.Load()),
+		issuedSlots:    &t.issuedSlotsAtomic,
 		logger:         t.logger,
 		metrics:        t.metrics,
 	})
 	if permit != nil {
 		t.issuedSlotsAtomic.Add(1)
-		t.publishMetrics(false)
+		t.slotsMutex.Lock()
+		usedSlots := len(t.usedSlots)
+		t.slotsMutex.Unlock()
+		t.publishMetrics(usedSlots)
 	}
 	return permit
 }
@@ -442,14 +485,15 @@ func (t *trackingSlotSupplier) MarkSlotUsed(permit *SlotPermit) {
 		panic("Cannot mark nil permit as used")
 	}
 	t.slotsMutex.Lock()
-	defer t.slotsMutex.Unlock()
 	t.usedSlots[permit] = struct{}{}
+	usedSlots := len(t.usedSlots)
+	t.slotsMutex.Unlock()
 	t.inner.MarkSlotUsed(&slotMarkUsedContextImpl{
 		permit:  permit,
 		logger:  t.logger,
 		metrics: t.metrics,
 	})
-	t.publishMetrics(true)
+	t.publishMetrics(usedSlots)
 }
 
 func (t *trackingSlotSupplier) ReleaseSlot(permit *SlotPermit, reason SlotReleaseReason) {
@@ -457,7 +501,9 @@ func (t *trackingSlotSupplier) ReleaseSlot(permit *SlotPermit, reason SlotReleas
 		panic("Cannot release with nil permit")
 	}
 	t.slotsMutex.Lock()
-	defer t.slotsMutex.Unlock()
+	delete(t.usedSlots, permit)
+	usedSlots := len(t.usedSlots)
+	t.slotsMutex.Unlock()
 	t.inner.ReleaseSlot(&slotReleaseContextImpl{
 		permit:  permit,
 		reason:  reason,
@@ -465,19 +511,13 @@ func (t *trackingSlotSupplier) ReleaseSlot(permit *SlotPermit, reason SlotReleas
 		metrics: t.metrics,
 	})
 	t.issuedSlotsAtomic.Add(-1)
-	delete(t.usedSlots, permit)
 	if permit.extraReleaseCallback != nil {
 		permit.extraReleaseCallback()
 	}
-	t.publishMetrics(true)
+	t.publishMetrics(usedSlots)
 }
 
-func (t *trackingSlotSupplier) publishMetrics(lockAlreadyHeld bool) {
-	if !lockAlreadyHeld {
-		t.slotsMutex.Lock()
-		defer t.slotsMutex.Unlock()
-	}
-	usedSlots := len(t.usedSlots)
+func (t *trackingSlotSupplier) publishMetrics(usedSlots int) {
 	if t.inner.MaxSlots() != 0 {
 		t.taskSlotsAvailableGauge.Update(float64(t.inner.MaxSlots() - usedSlots))
 	}

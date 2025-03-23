@@ -976,26 +976,250 @@ func (s *workflowRunSuite) TestGetWorkflowNoExtantWorkflowAndNoRunId() {
 	s.Equal("", workflowRunNoRunID.GetRunID())
 }
 
-func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_NonMultiOperationError() {
+func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_Retry() {
 	s.workflowServiceClient.EXPECT().
 		ExecuteMultiOperation(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, serviceerror.NewInternal("internal error")).Times(1)
+		Return(&workflowservice.ExecuteMultiOperationResponse{
+			Responses: []*workflowservice.ExecuteMultiOperationResponse_Response{
+				{
+					Response: &workflowservice.ExecuteMultiOperationResponse_Response_StartWorkflow{},
+				},
+				{
+					// 1st response: empty response, Update is not durable yet, client retries
+					Response: &workflowservice.ExecuteMultiOperationResponse_Response_UpdateWorkflow{},
+				},
+			},
+		}, nil).
+		Return(&workflowservice.ExecuteMultiOperationResponse{
+			Responses: []*workflowservice.ExecuteMultiOperationResponse_Response{
+				{
+					Response: &workflowservice.ExecuteMultiOperationResponse_Response_StartWorkflow{
+						StartWorkflow: &workflowservice.StartWorkflowExecutionResponse{
+							RunId: "RUN_ID",
+						},
+					},
+				},
+				{
+					// 2nd response: non-empty response, Update is durable
+					Response: &workflowservice.ExecuteMultiOperationResponse_Response_UpdateWorkflow{
+						UpdateWorkflow: &workflowservice.UpdateWorkflowExecutionResponse{
+							Stage: enumspb.UPDATE_WORKFLOW_EXECUTION_LIFECYCLE_STAGE_COMPLETED,
+						},
+					},
+				},
+			},
+		}, nil)
 
-	updOp := NewUpdateWithStartWorkflowOperation(
-		UpdateWorkflowOptions{
-			UpdateName:   "update",
-			WaitForStage: WorkflowUpdateStageCompleted,
-		})
-
-	_, err := s.workflowClient.ExecuteWorkflow(
-		context.Background(),
+	startOp := s.workflowClient.NewWithStartWorkflowOperation(
 		StartWorkflowOptions{
-			ID:                 workflowID,
-			TaskQueue:          taskqueue,
-			WithStartOperation: updOp,
+			ID:                       workflowID,
+			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+			TaskQueue:                taskqueue,
 		}, workflowType,
 	)
-	s.ErrorContains(err, "internal error")
+
+	_, err := s.workflowClient.UpdateWithStartWorkflow(
+		context.Background(),
+		UpdateWithStartWorkflowOptions{
+			UpdateOptions: UpdateWorkflowOptions{
+				UpdateName:   "update",
+				WaitForStage: WorkflowUpdateStageCompleted,
+			},
+			StartWorkflowOperation: startOp,
+		},
+	)
+	s.NoError(err)
+}
+
+func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_DefaultTimeout() {
+	var actualDeadline time.Time
+	expectedDeadline := time.Now().Add(pollUpdateTimeout)
+	s.workflowServiceClient.EXPECT().
+		ExecuteMultiOperation(gomock.Any(), gomock.Any(), gomock.Any()).
+		DoAndReturn(func(
+			ctx context.Context,
+			_ *workflowservice.ExecuteMultiOperationRequest,
+			_ ...grpc.CallOption,
+		) (*workflowservice.ExecuteMultiOperationResponse, error) {
+			actualDeadline, _ = ctx.Deadline()
+			return nil, errors.New("intentional error")
+		})
+
+	_, _ = s.workflowClient.UpdateWithStartWorkflow(
+		context.Background(),
+		UpdateWithStartWorkflowOptions{
+			UpdateOptions: UpdateWorkflowOptions{
+				UpdateName:   "update",
+				WaitForStage: WorkflowUpdateStageCompleted,
+			},
+			StartWorkflowOperation: s.workflowClient.NewWithStartWorkflowOperation(
+				StartWorkflowOptions{
+					ID:                       workflowID,
+					WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+					TaskQueue:                taskqueue,
+				}, workflowType,
+			),
+		},
+	)
+
+	require.WithinDuration(s.T(), expectedDeadline, actualDeadline, 2*time.Second)
+}
+
+func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_OperationNotExecuted() {
+	startOp := s.workflowClient.NewWithStartWorkflowOperation(
+		StartWorkflowOptions{
+			ID:                       workflowID,
+			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+			TaskQueue:                taskqueue,
+		}, workflowType,
+	)
+
+	ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	_, err := startOp.Get(ctxWithTimeout)
+	require.EqualError(s.T(), err, "context deadline exceeded: operation was not executed")
+}
+
+func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_Abort() {
+	tests := []struct {
+		name        string
+		expectedErr string
+		respFunc    func(ctx context.Context, in *workflowservice.ExecuteMultiOperationRequest, opts ...grpc.CallOption) (*workflowservice.ExecuteMultiOperationResponse, error)
+	}{
+		{
+			name:        "Timeout",
+			expectedErr: "context deadline exceeded",
+			respFunc: func(ctx context.Context, in *workflowservice.ExecuteMultiOperationRequest, opts ...grpc.CallOption) (*workflowservice.ExecuteMultiOperationResponse, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		},
+		{
+			name:        "Cancelled",
+			expectedErr: "was_cancelled",
+			respFunc: func(ctx context.Context, in *workflowservice.ExecuteMultiOperationRequest, opts ...grpc.CallOption) (*workflowservice.ExecuteMultiOperationResponse, error) {
+				return nil, serviceerror.NewCanceled("was_cancelled")
+			},
+		},
+		{
+			name:        "DeadlineExceeded",
+			expectedErr: "deadline_exceeded",
+			respFunc: func(ctx context.Context, in *workflowservice.ExecuteMultiOperationRequest, opts ...grpc.CallOption) (*workflowservice.ExecuteMultiOperationResponse, error) {
+				return nil, serviceerror.NewDeadlineExceeded("deadline_exceeded")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.workflowServiceClient.EXPECT().
+				ExecuteMultiOperation(gomock.Any(), gomock.Any(), gomock.Any()).
+				DoAndReturn(tt.respFunc)
+
+			startOp := s.workflowClient.NewWithStartWorkflowOperation(
+				StartWorkflowOptions{
+					ID:                       workflowID,
+					WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+					TaskQueue:                taskqueue,
+				}, workflowType,
+			)
+
+			ctxWithTimeout, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			_, err := s.workflowClient.UpdateWithStartWorkflow(
+				ctxWithTimeout,
+				UpdateWithStartWorkflowOptions{
+					UpdateOptions: UpdateWorkflowOptions{
+						UpdateName:   "update",
+						WaitForStage: WorkflowUpdateStageCompleted,
+					},
+					StartWorkflowOperation: startOp,
+				},
+			)
+
+			var expectedErr *WorkflowUpdateServiceTimeoutOrCanceledError
+			require.ErrorAs(s.T(), err, &expectedErr)
+			require.ErrorContains(s.T(), err, tt.expectedErr)
+		})
+	}
+}
+
+func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_Errors() {
+	tests := []struct {
+		name        string
+		returnedErr error
+		expectedErr string
+	}{
+		{
+			name:        "NonMultiOperationError",
+			returnedErr: serviceerror.NewInternal("internal error"),
+			expectedErr: "internal error",
+		},
+		{
+			name:        "CountMismatch",
+			returnedErr: serviceerror.NewMultiOperationExecution("Error", []error{}),
+			expectedErr: "invalid server response: 0 instead of 2 operation errors",
+		},
+		{
+			name: "NilErrors",
+			returnedErr: serviceerror.NewMultiOperationExecution("MultiOperation failed", []error{
+				nil, nil,
+			}),
+			expectedErr: "MultiOperation failed",
+		},
+		{
+			name: "StartOperationError",
+			returnedErr: serviceerror.NewMultiOperationExecution("MultiOperation failed", []error{
+				serviceerror.NewInvalidArgument("invalid Start"),
+				serviceerror.NewMultiOperationAborted("aborted Update"),
+			}),
+			expectedErr: "failed workflow start: invalid Start",
+		},
+		{
+			name: "UpdateOperationError_AbortedStart",
+			returnedErr: serviceerror.NewMultiOperationExecution("MultiOperation failed", []error{
+				serviceerror.NewMultiOperationAborted("aborted Start"),
+				serviceerror.NewInvalidArgument("invalid Update"),
+			}),
+			expectedErr: "failed workflow update: invalid Update",
+		},
+		{
+			name: "UpdateOperationError_SuccessfulStart",
+			returnedErr: serviceerror.NewMultiOperationExecution("MultiOperation failed", []error{
+				nil, // ie successful start
+				serviceerror.NewInvalidArgument("bad Update"),
+			}),
+			expectedErr: "failed workflow update: bad Update",
+		},
+	}
+
+	for _, tt := range tests {
+		s.Run(tt.name, func() {
+			s.workflowServiceClient.EXPECT().
+				ExecuteMultiOperation(gomock.Any(), gomock.Any(), gomock.Any()).
+				Return(nil, tt.returnedErr).Times(1)
+
+			_, err := s.workflowClient.UpdateWithStartWorkflow(
+				context.Background(),
+				UpdateWithStartWorkflowOptions{
+					UpdateOptions: UpdateWorkflowOptions{
+						UpdateName:   "update",
+						WaitForStage: WorkflowUpdateStageCompleted,
+					},
+					StartWorkflowOperation: s.workflowClient.NewWithStartWorkflowOperation(
+						StartWorkflowOptions{
+							ID:                       workflowID,
+							WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+							TaskQueue:                taskqueue,
+						}, workflowType,
+					),
+				},
+			)
+			s.EqualError(err, tt.expectedErr)
+		})
+	}
 }
 
 func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_ServerResponseCountMismatch() {
@@ -1005,43 +1229,25 @@ func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_ServerResponseCountMism
 			Responses: []*workflowservice.ExecuteMultiOperationResponse_Response{},
 		}, nil).Times(1)
 
-	updOp := NewUpdateWithStartWorkflowOperation(
-		UpdateWorkflowOptions{
-			UpdateName:   "update",
-			WaitForStage: WorkflowUpdateStageCompleted,
-		})
-
-	_, err := s.workflowClient.ExecuteWorkflow(
-		context.Background(),
+	startOp := s.workflowClient.NewWithStartWorkflowOperation(
 		StartWorkflowOptions{
-			ID:                 workflowID,
-			TaskQueue:          taskqueue,
-			WithStartOperation: updOp,
+			ID:                       workflowID,
+			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+			TaskQueue:                taskqueue,
 		}, workflowType,
+	)
+
+	_, err := s.workflowClient.UpdateWithStartWorkflow(
+		context.Background(),
+		UpdateWithStartWorkflowOptions{
+			UpdateOptions: UpdateWorkflowOptions{
+				UpdateName:   "update",
+				WaitForStage: WorkflowUpdateStageCompleted,
+			},
+			StartWorkflowOperation: startOp,
+		},
 	)
 	s.ErrorContains(err, "invalid server response: 0 instead of 2 operation results")
-}
-
-func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_ServerErrorResponseCountMismatch() {
-	s.workflowServiceClient.EXPECT().
-		ExecuteMultiOperation(gomock.Any(), gomock.Any(), gomock.Any()).
-		Return(nil, serviceerror.NewMultiOperationExecution("Error", []error{})).Times(1)
-
-	updOp := NewUpdateWithStartWorkflowOperation(
-		UpdateWorkflowOptions{
-			UpdateName:   "update",
-			WaitForStage: WorkflowUpdateStageCompleted,
-		})
-
-	_, err := s.workflowClient.ExecuteWorkflow(
-		context.Background(),
-		StartWorkflowOptions{
-			ID:                 workflowID,
-			TaskQueue:          taskqueue,
-			WithStartOperation: updOp,
-		}, workflowType,
-	)
-	s.ErrorContains(err, "invalid server response: 0 instead of 2 operation errors")
 }
 
 func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_ServerStartResponseTypeMismatch() {
@@ -1056,19 +1262,23 @@ func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_ServerStartResponseType
 			},
 		}, nil).Times(1)
 
-	updOp := NewUpdateWithStartWorkflowOperation(
-		UpdateWorkflowOptions{
-			UpdateName:   "update",
-			WaitForStage: WorkflowUpdateStageCompleted,
-		})
-
-	_, err := s.workflowClient.ExecuteWorkflow(
-		context.Background(),
+	startOp := s.workflowClient.NewWithStartWorkflowOperation(
 		StartWorkflowOptions{
-			ID:                 workflowID,
-			TaskQueue:          taskqueue,
-			WithStartOperation: updOp,
+			ID:                       workflowID,
+			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+			TaskQueue:                taskqueue,
 		}, workflowType,
+	)
+
+	_, err := s.workflowClient.UpdateWithStartWorkflow(
+		context.Background(),
+		UpdateWithStartWorkflowOptions{
+			UpdateOptions: UpdateWorkflowOptions{
+				UpdateName:   "update",
+				WaitForStage: WorkflowUpdateStageCompleted,
+			},
+			StartWorkflowOperation: startOp,
+		},
 	)
 	s.ErrorContains(err, "invalid server response: StartWorkflow response has the wrong type *workflowservice.ExecuteMultiOperationResponse_Response_UpdateWorkflow")
 }
@@ -1079,7 +1289,11 @@ func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_ServerUpdateResponseTyp
 		Return(&workflowservice.ExecuteMultiOperationResponse{
 			Responses: []*workflowservice.ExecuteMultiOperationResponse_Response{
 				{
-					Response: &workflowservice.ExecuteMultiOperationResponse_Response_StartWorkflow{},
+					Response: &workflowservice.ExecuteMultiOperationResponse_Response_StartWorkflow{
+						StartWorkflow: &workflowservice.StartWorkflowExecutionResponse{
+							RunId: "RUN_ID",
+						},
+					},
 				},
 				{
 					Response: &workflowservice.ExecuteMultiOperationResponse_Response_StartWorkflow{}, // wrong!
@@ -1087,19 +1301,23 @@ func (s *workflowRunSuite) TestExecuteWorkflowWithUpdate_ServerUpdateResponseTyp
 			},
 		}, nil).Times(1)
 
-	updOp := NewUpdateWithStartWorkflowOperation(
-		UpdateWorkflowOptions{
-			UpdateName:   "update",
-			WaitForStage: WorkflowUpdateStageCompleted,
-		})
-
-	_, err := s.workflowClient.ExecuteWorkflow(
-		context.Background(),
+	startOp := s.workflowClient.NewWithStartWorkflowOperation(
 		StartWorkflowOptions{
-			ID:                 workflowID,
-			TaskQueue:          taskqueue,
-			WithStartOperation: updOp,
+			ID:                       workflowID,
+			WorkflowIDConflictPolicy: enumspb.WORKFLOW_ID_CONFLICT_POLICY_FAIL,
+			TaskQueue:                taskqueue,
 		}, workflowType,
+	)
+
+	_, err := s.workflowClient.UpdateWithStartWorkflow(
+		context.Background(),
+		UpdateWithStartWorkflowOptions{
+			UpdateOptions: UpdateWorkflowOptions{
+				UpdateName:   "update",
+				WaitForStage: WorkflowUpdateStageCompleted,
+			},
+			StartWorkflowOperation: startOp,
+		},
 	)
 	s.ErrorContains(err, "invalid server response: UpdateWorkflow response has the wrong type *workflowservice.ExecuteMultiOperationResponse_Response_StartWorkflow")
 }
@@ -1217,15 +1435,6 @@ func (s *workflowClientTestSuite) TestSignalWithStartWorkflowValidation() {
 		context.Background(), "workflow-id-1", "my-signal", "my-signal-value",
 		StartWorkflowOptions{ID: "workflow-id-2"}, workflowType)
 	s.ErrorContains(err, "workflow ID from options not used")
-
-	// unsupported WithStartOperation
-	_, err = s.client.SignalWithStartWorkflow(
-		context.Background(), "workflow-id", "my-signal", "my-signal-value",
-		StartWorkflowOptions{
-			ID:                 "workflow-id",
-			WithStartOperation: &UpdateWithStartWorkflowOperation{},
-		}, workflowType)
-	s.ErrorContains(err, "option WithStartOperation is not allowed")
 }
 
 func (s *workflowClientTestSuite) TestStartWorkflow() {
@@ -1266,7 +1475,7 @@ func (s *workflowClientTestSuite) TestEagerStartWorkflowNotSupported() {
 		},
 	}
 	client.eagerDispatcher = &eagerWorkflowDispatcher{
-		workersByTaskQueue: map[string][]eagerWorker{taskqueue: {eagerMock}},
+		workersByTaskQueue: map[string]map[eagerWorker]struct{}{taskqueue: {eagerMock: {}}},
 	}
 	s.True(ok)
 	options := StartWorkflowOptions{
@@ -1305,7 +1514,7 @@ func (s *workflowClientTestSuite) TestEagerStartWorkflowNoWorker() {
 		tryReserveSlotCallback:   func() *SlotPermit { return nil },
 		processTaskAsyncCallback: func(task eagerTask) { processTask = true }}
 	client.eagerDispatcher = &eagerWorkflowDispatcher{
-		workersByTaskQueue: map[string][]eagerWorker{taskqueue: {eagerMock}},
+		workersByTaskQueue: map[string]map[eagerWorker]struct{}{taskqueue: {eagerMock: {}}},
 	}
 	s.True(ok)
 	options := StartWorkflowOptions{
@@ -1344,7 +1553,7 @@ func (s *workflowClientTestSuite) TestEagerStartWorkflow() {
 		tryReserveSlotCallback:   func() *SlotPermit { return &SlotPermit{} },
 		processTaskAsyncCallback: func(task eagerTask) { processTask = true }}
 	client.eagerDispatcher = &eagerWorkflowDispatcher{
-		workersByTaskQueue: map[string][]eagerWorker{taskqueue: {eagerMock}}}
+		workersByTaskQueue: map[string]map[eagerWorker]struct{}{taskqueue: {eagerMock: {}}}}
 	s.True(ok)
 	options := StartWorkflowOptions{
 		ID:                       workflowID,
@@ -1384,7 +1593,7 @@ func (s *workflowClientTestSuite) TestEagerStartWorkflowStartRequestFail() {
 		tryReserveSlotCallback:   func() *SlotPermit { return &SlotPermit{} },
 		processTaskAsyncCallback: func(task eagerTask) { processTask = true }}
 	client.eagerDispatcher = &eagerWorkflowDispatcher{
-		workersByTaskQueue: map[string][]eagerWorker{taskqueue: {eagerMock}}}
+		workersByTaskQueue: map[string]map[eagerWorker]struct{}{taskqueue: {eagerMock: {}}}}
 	s.True(ok)
 	options := StartWorkflowOptions{
 		ID:                       workflowID,
@@ -1543,6 +1752,75 @@ func (s *workflowClientTestSuite) TestSignalWithStartWorkflowWithMemoAndSearchAt
 	_, _ = s.client.SignalWithStartWorkflow(context.Background(), "wid", "signal", "value", options, wf)
 }
 
+func (s *workflowClientTestSuite) TestStartWorkflowWithVersioningOverride() {
+	versioningOverride := VersioningOverride{
+		Behavior:      VersioningBehaviorPinned,
+		PinnedVersion: "deployment1.build1",
+		Deployment: Deployment{
+			BuildID:    "build1",
+			SeriesName: "deployment1",
+		},
+	}
+
+	options := StartWorkflowOptions{
+		ID:                       workflowID,
+		TaskQueue:                taskqueue,
+		WorkflowExecutionTimeout: timeoutInSeconds,
+		WorkflowTaskTimeout:      timeoutInSeconds,
+		VersioningOverride:       versioningOverride,
+	}
+
+	wf := func(ctx Context) string {
+		panic("this is just a stub")
+	}
+	startResp := &workflowservice.StartWorkflowExecutionResponse{}
+
+	s.service.EXPECT().StartWorkflowExecution(gomock.Any(), gomock.Any(), gomock.Any()).Return(startResp, nil).
+		Do(func(_ interface{}, req *workflowservice.StartWorkflowExecutionRequest, _ ...interface{}) {
+			s.Equal(versioningBehaviorToProto(VersioningBehaviorPinned), req.VersioningOverride.GetBehavior())
+			//lint:ignore SA1019 ignore deprecated versioning APIs
+			s.Equal("build1", req.VersioningOverride.GetDeployment().GetBuildId())
+			//lint:ignore SA1019 ignore deprecated versioning APIs
+			s.Equal("deployment1", req.VersioningOverride.GetDeployment().GetSeriesName())
+			s.Equal("deployment1.build1", req.VersioningOverride.GetPinnedVersion())
+		})
+	_, _ = s.client.ExecuteWorkflow(context.Background(), options, wf)
+}
+
+func (s *workflowClientTestSuite) TestSignalWithStartWorkflowWithVersioningOverride() {
+	versioningOverride := VersioningOverride{
+		Behavior:      VersioningBehaviorPinned,
+		PinnedVersion: "deployment1.build1",
+		Deployment: Deployment{
+			BuildID:    "build1",
+			SeriesName: "deployment1",
+		},
+	}
+
+	options := StartWorkflowOptions{
+		ID:                       "wid",
+		TaskQueue:                taskqueue,
+		WorkflowExecutionTimeout: timeoutInSeconds,
+		WorkflowTaskTimeout:      timeoutInSeconds,
+		VersioningOverride:       versioningOverride,
+	}
+	wf := func(ctx Context) string {
+		panic("this is just a stub")
+	}
+	startResp := &workflowservice.SignalWithStartWorkflowExecutionResponse{}
+
+	s.service.EXPECT().SignalWithStartWorkflowExecution(gomock.Any(), gomock.Any(), gomock.Any()).Return(startResp, nil).
+		Do(func(_ interface{}, req *workflowservice.SignalWithStartWorkflowExecutionRequest, _ ...interface{}) {
+			s.Equal(versioningBehaviorToProto(VersioningBehaviorPinned), req.VersioningOverride.GetBehavior())
+			//lint:ignore SA1019 ignore deprecated versioning APIs
+			s.Equal("build1", req.VersioningOverride.GetDeployment().GetBuildId())
+			//lint:ignore SA1019 ignore deprecated versioning APIs
+			s.Equal("deployment1", req.VersioningOverride.GetDeployment().GetSeriesName())
+			s.Equal("deployment1.build1", req.VersioningOverride.GetPinnedVersion())
+		})
+	_, _ = s.client.SignalWithStartWorkflow(context.Background(), "wid", "signal", "value", options, wf)
+}
+
 func (s *workflowClientTestSuite) TestGetWorkflowMemo() {
 	var input1 map[string]interface{}
 	result1, err := getWorkflowMemo(input1, s.dataConverter)
@@ -1656,9 +1934,12 @@ func (s *workflowClientTestSuite) TestListArchivedWorkflow() {
 }
 
 func (s *workflowClientTestSuite) TestScanWorkflow() {
+	//lint:ignore SA1019 the server API was deprecated.
 	request := &workflowservice.ScanWorkflowExecutionsRequest{}
+	//lint:ignore SA1019 the server API was deprecated.
 	response := &workflowservice.ScanWorkflowExecutionsResponse{}
 	s.service.EXPECT().ScanWorkflowExecutions(gomock.Any(), gomock.Any(), gomock.Any()).Return(response, nil).
+		//lint:ignore SA1019 the server API was deprecated.
 		Do(func(_ interface{}, req *workflowservice.ScanWorkflowExecutionsRequest, _ ...interface{}) {
 			s.Equal(DefaultNamespace, request.GetNamespace())
 		})
@@ -1668,6 +1949,7 @@ func (s *workflowClientTestSuite) TestScanWorkflow() {
 
 	request.Namespace = "another"
 	s.service.EXPECT().ScanWorkflowExecutions(gomock.Any(), gomock.Any(), gomock.Any()).Return(nil, serviceerror.NewInvalidArgument("")).
+		//lint:ignore SA1019 the server API was deprecated.
 		Do(func(_ interface{}, req *workflowservice.ScanWorkflowExecutionsRequest, _ ...interface{}) {
 			s.Equal("another", request.GetNamespace())
 		})

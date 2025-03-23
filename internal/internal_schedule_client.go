@@ -31,7 +31,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	"github.com/pborman/uuid"
+	"github.com/google/uuid"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 	schedulepb "go.temporal.io/api/schedule/v1"
@@ -131,7 +131,7 @@ func (w *workflowClientInterceptor) CreateSchedule(ctx context.Context, in *Sche
 	startRequest := &workflowservice.CreateScheduleRequest{
 		Namespace:  w.client.namespace,
 		ScheduleId: ID,
-		RequestId:  uuid.New(),
+		RequestId:  uuid.NewString(),
 		Schedule: &schedulepb.Schedule{
 			Spec:   convertToPBScheduleSpec(&in.Options.Spec),
 			Action: action,
@@ -256,7 +256,7 @@ func (scheduleHandle *scheduleHandleImpl) Backfill(ctx context.Context, options 
 			BackfillRequest: convertToPBBackfillList(options.Backfill),
 		},
 		Identity:  scheduleHandle.client.identity,
-		RequestId: uuid.New(),
+		RequestId: uuid.NewString(),
 	}
 	grpcCtx, cancel := newGRPCContext(ctx, defaultGrpcRetryParameters(ctx))
 	defer cancel()
@@ -277,7 +277,8 @@ func (scheduleHandle *scheduleHandleImpl) Update(ctx context.Context, options Sc
 	if err != nil {
 		return err
 	}
-	scheduleDescription, err := scheduleDescriptionFromPB(scheduleHandle.client.logger, describeResponse)
+	scheduleDescription, err := scheduleDescriptionFromPB(
+		scheduleHandle.client.logger, scheduleHandle.client.dataConverter, describeResponse)
 	if err != nil {
 		return err
 	}
@@ -310,7 +311,7 @@ func (scheduleHandle *scheduleHandleImpl) Update(ctx context.Context, options Sc
 		Schedule:         newSchedulePB,
 		ConflictToken:    nil,
 		Identity:         scheduleHandle.client.identity,
-		RequestId:        uuid.New(),
+		RequestId:        uuid.NewString(),
 		SearchAttributes: newSA,
 	})
 	return err
@@ -327,7 +328,8 @@ func (scheduleHandle *scheduleHandleImpl) Describe(ctx context.Context) (*Schedu
 	if err != nil {
 		return nil, err
 	}
-	return scheduleDescriptionFromPB(scheduleHandle.client.logger, describeResponse)
+	return scheduleDescriptionFromPB(
+		scheduleHandle.client.logger, scheduleHandle.client.dataConverter, describeResponse)
 }
 
 func (scheduleHandle *scheduleHandleImpl) Trigger(ctx context.Context, options ScheduleTriggerOptions) error {
@@ -340,7 +342,7 @@ func (scheduleHandle *scheduleHandleImpl) Trigger(ctx context.Context, options S
 			},
 		},
 		Identity:  scheduleHandle.client.identity,
-		RequestId: uuid.New(),
+		RequestId: uuid.NewString(),
 	}
 	grpcCtx, cancel := newGRPCContext(ctx, defaultGrpcRetryParameters(ctx))
 	defer cancel()
@@ -360,7 +362,7 @@ func (scheduleHandle *scheduleHandleImpl) Pause(ctx context.Context, options Sch
 			Pause: pauseNote,
 		},
 		Identity:  scheduleHandle.client.identity,
-		RequestId: uuid.New(),
+		RequestId: uuid.NewString(),
 	}
 	grpcCtx, cancel := newGRPCContext(ctx, defaultGrpcRetryParameters(ctx))
 	defer cancel()
@@ -380,7 +382,7 @@ func (scheduleHandle *scheduleHandleImpl) Unpause(ctx context.Context, options S
 			Unpause: unpauseNote,
 		},
 		Identity:  scheduleHandle.client.identity,
-		RequestId: uuid.New(),
+		RequestId: uuid.NewString(),
 	}
 	grpcCtx, cancel := newGRPCContext(ctx, defaultGrpcRetryParameters(ctx))
 	defer cancel()
@@ -469,6 +471,7 @@ func convertFromPBScheduleSpec(scheduleSpec *schedulepb.ScheduleSpec) *ScheduleS
 
 func scheduleDescriptionFromPB(
 	logger log.Logger,
+	dc converter.DataConverter,
 	describeResponse *workflowservice.DescribeScheduleResponse,
 ) (*ScheduleDescription, error) {
 	if describeResponse == nil {
@@ -490,7 +493,7 @@ func scheduleDescriptionFromPB(
 		nextActionTimes[i] = t.AsTime()
 	}
 
-	actionDescription, err := convertFromPBScheduleAction(logger, describeResponse.Schedule.Action)
+	actionDescription, err := convertFromPBScheduleAction(logger, dc, describeResponse.Schedule.Action)
 	if err != nil {
 		return nil, err
 	}
@@ -595,7 +598,7 @@ func convertToPBScheduleAction(
 
 		// Default workflow ID
 		if action.ID == "" {
-			action.ID = uuid.New()
+			action.ID = uuid.NewString()
 		}
 
 		// Validate function and get name
@@ -637,7 +640,7 @@ func convertToPBScheduleAction(
 			return nil, err
 		}
 
-		userMetadata, err := buildUserMetadata(action.staticSummary, action.staticDetails, dataConverter)
+		userMetadata, err := buildUserMetadata(action.StaticSummary, action.StaticDetails, dataConverter)
 		if err != nil {
 			return nil, err
 		}
@@ -657,6 +660,7 @@ func convertToPBScheduleAction(
 					SearchAttributes:         searchAttrs,
 					Header:                   header,
 					UserMetadata:             userMetadata,
+					VersioningOverride:       versioningOverrideToProto(action.VersioningOverride),
 				},
 			},
 		}, nil
@@ -666,7 +670,11 @@ func convertToPBScheduleAction(
 	}
 }
 
-func convertFromPBScheduleAction(logger log.Logger, action *schedulepb.ScheduleAction) (ScheduleAction, error) {
+func convertFromPBScheduleAction(
+	logger log.Logger,
+	dc converter.DataConverter,
+	action *schedulepb.ScheduleAction,
+) (ScheduleAction, error) {
 	switch action := action.Action.(type) {
 	case *schedulepb.ScheduleAction_StartWorkflow:
 		workflow := action.StartWorkflow
@@ -696,6 +704,17 @@ func convertFromPBScheduleAction(logger log.Logger, action *schedulepb.ScheduleA
 			}
 		}
 
+		var convertedSummary *string = new(string)
+		err := dc.FromPayload(workflow.GetUserMetadata().GetSummary(), convertedSummary)
+		if err != nil {
+			return nil, fmt.Errorf("could not decode user metadata summary: %w", err)
+		}
+		var convertedDetails *string = new(string)
+		err = dc.FromPayload(workflow.GetUserMetadata().GetDetails(), convertedDetails)
+		if err != nil {
+			return nil, fmt.Errorf("could not decode user metadata details: %w", err)
+		}
+
 		return &ScheduleWorkflowAction{
 			ID:                       workflow.GetWorkflowId(),
 			Workflow:                 workflow.WorkflowType.GetName(),
@@ -708,6 +727,9 @@ func convertFromPBScheduleAction(logger log.Logger, action *schedulepb.ScheduleA
 			Memo:                     memos,
 			TypedSearchAttributes:    searchAttrs,
 			UntypedSearchAttributes:  untypedSearchAttrs,
+			VersioningOverride:       versioningOverrideFromProto(workflow.VersioningOverride),
+			StaticSummary:            *convertedSummary,
+			StaticDetails:            *convertedDetails,
 		}, nil
 	default:
 		// TODO maybe just panic instead?

@@ -34,6 +34,7 @@ import (
 
 	"github.com/nexus-rpc/sdk-go/nexus"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	commonpb "go.temporal.io/api/common/v1"
 	enumspb "go.temporal.io/api/enums/v1"
 
@@ -54,6 +55,8 @@ type (
 	ErrorDetailsValues []interface{}
 
 	// WorkflowTestSuite is the test suite to run unit tests for workflow/activity.
+	//
+	// Exposed as: [go.temporal.io/sdk/testsuite.WorkflowTestSuite]
 	WorkflowTestSuite struct {
 		logger                      log.Logger
 		metricsHandler              metrics.Handler
@@ -63,24 +66,42 @@ type (
 	}
 
 	// TestWorkflowEnvironment is the environment that you use to test workflow
+	//
+	// Exposed as: [go.temporal.io/sdk/testsuite.TestWorkflowEnvironment]
 	TestWorkflowEnvironment struct {
 		workflowMock mock.Mock
 		activityMock mock.Mock
+		nexusMock    mock.Mock
 		impl         *testWorkflowEnvironmentImpl
 	}
 
 	// TestActivityEnvironment is the environment that you use to test activity
+	//
+	// Exposed as: [go.temporal.io/sdk/testsuite.TestActivityEnvironment]
 	TestActivityEnvironment struct {
 		impl *testWorkflowEnvironmentImpl
 	}
 
 	// MockCallWrapper is a wrapper to mock.Call. It offers the ability to wait on workflow's clock instead of wall clock.
+	//
+	// Exposed as: [go.temporal.io/sdk/testsuite.MockCallWrapper]
 	MockCallWrapper struct {
 		call *mock.Call
 		env  *TestWorkflowEnvironment
 
 		runFn        func(args mock.Arguments)
 		waitDuration func() time.Duration
+	}
+
+	// TestUpdateCallback is a basic implementation of the UpdateCallbacks interface for testing purposes.
+	// Tests are welcome to implement their own version of this interface if they need to test more complex
+	// update logic. This is a simple implementation to make testing basic Workflow Updates easier.
+	//
+	// Exposed as: [go.temporal.io/sdk/testsuite.TestUpdateCallback]
+	TestUpdateCallback struct {
+		OnAccept   func()
+		OnReject   func(error)
+		OnComplete func(interface{}, error)
 	}
 )
 
@@ -203,6 +224,7 @@ func (t *TestActivityEnvironment) ExecuteLocalActivity(activityFn interface{}, a
 // SetWorkerOptions sets the WorkerOptions that will be use by TestActivityEnvironment. TestActivityEnvironment will
 // use options of BackgroundActivityContext, MaxConcurrentSessionExecutionSize, and WorkflowInterceptorChainFactories on the WorkerOptions.
 // Other options are ignored.
+//
 // Note: WorkerOptions is defined in internal package, use public type worker.Options instead.
 func (t *TestActivityEnvironment) SetWorkerOptions(options WorkerOptions) *TestActivityEnvironment {
 	t.impl.setWorkerOptions(options)
@@ -260,6 +282,8 @@ func (t *TestActivityEnvironment) SetWorkerStopChannel(c chan struct{}) {
 // SetOnActivityHeartbeatListener sets a listener that will be called when
 // activity heartbeat is called. ActivityInfo is defined in internal package,
 // use public type activity.Info instead.
+//
+// Note: The provided listener may be called concurrently.
 //
 // Note: Due to internal caching by the activity system, this may not get called
 // for every heartbeat recorded. This is only called when the heartbeat would be
@@ -338,6 +362,16 @@ func (e *TestWorkflowEnvironment) SetContinuedExecutionRunID(rid string) {
 	e.impl.setContinuedExecutionRunID(rid)
 }
 
+// InOrderMockCalls declares that the given calls should occur in order. Syntax sugar for NotBefore.
+func (e *TestWorkflowEnvironment) InOrderMockCalls(calls ...*MockCallWrapper) {
+	wrappedCalls := make([]*mock.Call, 0, len(calls))
+	for _, call := range calls {
+		wrappedCalls = append(wrappedCalls, call.call)
+	}
+
+	mock.InOrder(wrappedCalls...)
+}
+
 // OnActivity setup a mock call for activity. Parameter activity must be activity function (func) or activity name (string).
 // You must call Return() with appropriate parameters on the returned *MockCallWrapper instance. The supplied parameters to
 // the Return() call should either be a function that has exact same signature as the mocked activity, or it should be
@@ -395,6 +429,8 @@ func (e *TestWorkflowEnvironment) OnActivity(activity interface{}, args ...inter
 
 // ErrMockStartChildWorkflowFailed is special error used to indicate the mocked child workflow should fail to start.
 // This error is also exposed as public as testsuite.ErrMockStartChildWorkflowFailed
+//
+// Exposed as: [go.temporal.io/sdk/testsuite.ErrMockStartChildWorkflowFailed]
 var ErrMockStartChildWorkflowFailed = fmt.Errorf("start child workflow failed: %v", enumspb.START_CHILD_WORKFLOW_EXECUTION_FAILED_CAUSE_WORKFLOW_ALREADY_EXISTS)
 
 // OnWorkflow setup a mock call for workflow. Parameter workflow must be workflow function (func) or workflow name (string).
@@ -529,6 +565,7 @@ func (e *TestWorkflowEnvironment) OnUpsertSearchAttributes(attributes interface{
 // OnUpsertTypedSearchAttributes setup a mock for workflow.UpsertTypedSearchAttributes call.
 // If mock is not setup, the UpsertTypedSearchAttributes call will only validate input attributes.
 // If mock is setup, all UpsertTypedSearchAttributes calls in workflow have to be mocked.
+//
 // Note: The mock is called with a temporal.SearchAttributes constructed from the inputs to workflow.UpsertTypedSearchAttributes.
 func (e *TestWorkflowEnvironment) OnUpsertTypedSearchAttributes(attributes interface{}) *MockCallWrapper {
 	call := e.workflowMock.On(mockMethodForUpsertTypedSearchAttributes, attributes)
@@ -543,6 +580,139 @@ func (e *TestWorkflowEnvironment) OnUpsertMemo(attributes interface{}) *MockCall
 	return e.wrapWorkflowCall(call)
 }
 
+// OnNexusOperation setup a mock call for Nexus operation.
+// Parameter service must be Nexus service (*nexus.Service) or service name (string).
+// Parameter operation must be Nexus operation (nexus.RegisterableOperation), Nexus operation
+// reference (nexus.OperationReference), or operation name (string).
+// You must call Return() with appropriate parameters on the returned *MockCallWrapper instance.
+// The first parameter of Return() is the result of type nexus.HandlerStartOperationResult[T], ie.,
+// it must be *nexus.HandlerStartOperationResultSync[T] or *nexus.HandlerStartOperationResultAsync.
+// The second parameter of Return() is an error.
+// If your mock returns *nexus.HandlerStartOperationResultAsync, then you need to register the
+// completion of the async operation by calling RegisterNexusAsyncOperationCompletion.
+// Example: assume the Nexus operation input/output types are as follows:
+//
+//	type (
+//		HelloInput struct {
+//			Message string
+//		}
+//		HelloOutput struct {
+//			Message string
+//		}
+//	)
+//
+// Then, you can mock workflow.NexusClient.ExecuteOperation as follows:
+//
+//	t.OnNexusOperation(
+//		"my-service",
+//		nexus.NewOperationReference[HelloInput, HelloOutput]("hello-operation"),
+//		HelloInput{Message: "Temporal"},
+//		mock.Anything, // NexusOperationOptions
+//	).Return(
+//		&nexus.HandlerStartOperationResultAsync{
+//			OperationToken: "hello-operation-token",
+//		},
+//		nil,
+//	)
+//	t.RegisterNexusAsyncOperationCompletion(
+//		"service-name",
+//		"hello-operation",
+//		"hello-operation-token",
+//		HelloOutput{Message: "Hello Temporal"},
+//		nil,
+//		1*time.Second,
+//	)
+func (e *TestWorkflowEnvironment) OnNexusOperation(
+	service any,
+	operation any,
+	input any,
+	options any,
+) *MockCallWrapper {
+	var s *nexus.Service
+	switch stp := service.(type) {
+	case *nexus.Service:
+		s = stp
+		if e.impl.registry.getNexusService(s.Name) == nil {
+			e.impl.RegisterNexusService(s)
+		}
+	case string:
+		s = e.impl.registry.getNexusService(stp)
+		if s == nil {
+			s = nexus.NewService(stp)
+			e.impl.RegisterNexusService(s)
+		}
+	default:
+		panic("service must be *nexus.Service or string")
+	}
+
+	var opRef testNexusOperationReference
+	switch otp := operation.(type) {
+	case testNexusOperationReference:
+		// This case covers both nexus.RegisterableOperation and nexus.OperationReference.
+		// All nexus.RegisterableOperation embeds nexus.UnimplementedOperation which
+		// implements nexus.OperationReference.
+		opRef = otp
+		if s.Operation(opRef.Name()) == nil {
+			if err := s.Register(newTestNexusOperation(opRef)); err != nil {
+				panic(fmt.Sprintf("cannot register operation %q: %v", opRef.Name(), err.Error()))
+			}
+		}
+	case string:
+		if op := s.Operation(otp); op != nil {
+			opRef = op.(testNexusOperationReference)
+		} else {
+			panic(fmt.Sprintf("operation %q not registered in service %q", otp, s.Name))
+		}
+	default:
+		panic("operation must be nexus.RegisterableOperation, nexus.OperationReference, or string")
+	}
+	e.impl.registerNexusOperationReference(s.Name, opRef)
+
+	if input != mock.Anything {
+		if opRef.InputType() != reflect.TypeOf(input) {
+			panic(fmt.Sprintf(
+				"operation %q expects input type %s, got %T",
+				opRef.Name(),
+				opRef.InputType(),
+				input,
+			))
+		}
+	}
+
+	if options != mock.Anything {
+		if _, ok := options.(NexusOperationOptions); !ok {
+			panic(fmt.Sprintf(
+				"options must be an instance of NexusOperationOptions or mock.Anything, got %T",
+				options,
+			))
+		}
+	}
+
+	call := e.nexusMock.On(s.Name, opRef.Name(), input, options)
+	return e.wrapNexusOperationCall(call)
+}
+
+// RegisterNexusAsyncOperationCompletion registers a delayed completion of an Nexus async operation.
+// The delay is counted from the moment the Nexus async operation starts. See the documentation of
+// OnNexusOperation for an example.
+func (e *TestWorkflowEnvironment) RegisterNexusAsyncOperationCompletion(
+	service string,
+	operation string,
+	token string,
+	result any,
+	err error,
+	delay time.Duration,
+) error {
+	return e.impl.RegisterNexusAsyncOperationCompletion(
+		service,
+		operation,
+		token,
+		result,
+		err,
+		delay,
+	)
+}
+
 func (e *TestWorkflowEnvironment) wrapWorkflowCall(call *mock.Call) *MockCallWrapper {
 	callWrapper := &MockCallWrapper{call: call, env: e}
 	call.Run(e.impl.getWorkflowMockRunFn(callWrapper))
@@ -552,6 +722,12 @@ func (e *TestWorkflowEnvironment) wrapWorkflowCall(call *mock.Call) *MockCallWra
 func (e *TestWorkflowEnvironment) wrapActivityCall(call *mock.Call) *MockCallWrapper {
 	callWrapper := &MockCallWrapper{call: call, env: e}
 	call.Run(e.impl.getActivityMockRunFn(callWrapper))
+	return callWrapper
+}
+
+func (e *TestWorkflowEnvironment) wrapNexusOperationCall(call *mock.Call) *MockCallWrapper {
+	callWrapper := &MockCallWrapper{call: call, env: e}
+	call.Run(e.impl.getNexusOperationMockRunFn(callWrapper))
 	return callWrapper
 }
 
@@ -627,11 +803,24 @@ func (c *MockCallWrapper) NotBefore(calls ...*MockCallWrapper) *MockCallWrapper 
 	return c
 }
 
+func (uc *TestUpdateCallback) Accept() {
+	uc.OnAccept()
+}
+
+func (uc *TestUpdateCallback) Reject(err error) {
+	uc.OnReject(err)
+}
+
+func (uc *TestUpdateCallback) Complete(success interface{}, err error) {
+	uc.OnComplete(success, err)
+}
+
 // ExecuteWorkflow executes a workflow, wait until workflow complete. It will fail the test if workflow is blocked and
 // cannot complete within TestTimeout (set by SetTestTimeout()).
 func (e *TestWorkflowEnvironment) ExecuteWorkflow(workflowFn interface{}, args ...interface{}) {
 	e.impl.workflowMock = &e.workflowMock
 	e.impl.activityMock = &e.activityMock
+	e.impl.nexusMock = &e.nexusMock
 	e.impl.executeWorkflow(workflowFn, args...)
 }
 
@@ -643,6 +832,7 @@ func (e *TestWorkflowEnvironment) Now() time.Time {
 // SetWorkerOptions sets the WorkerOptions that will be use by TestActivityEnvironment. TestActivityEnvironment will
 // use options of BackgroundActivityContext, MaxConcurrentSessionExecutionSize, and WorkflowInterceptorChainFactories on the WorkerOptions.
 // Other options are ignored.
+//
 // Note: WorkerOptions is defined in internal package, use public type worker.Options instead.
 func (e *TestWorkflowEnvironment) SetWorkerOptions(options WorkerOptions) *TestWorkflowEnvironment {
 	e.impl.setWorkerOptions(options)
@@ -724,6 +914,7 @@ func (e *TestWorkflowEnvironment) SetWorkflowRunTimeout(runTimeout time.Duration
 }
 
 // SetOnActivityStartedListener sets a listener that will be called before activity starts execution.
+//
 // Note: ActivityInfo is defined in internal package, use public type activity.Info instead.
 func (e *TestWorkflowEnvironment) SetOnActivityStartedListener(
 	listener func(activityInfo *ActivityInfo, ctx context.Context, args converter.EncodedValues)) *TestWorkflowEnvironment {
@@ -732,6 +923,7 @@ func (e *TestWorkflowEnvironment) SetOnActivityStartedListener(
 }
 
 // SetOnActivityCompletedListener sets a listener that will be called after an activity is completed.
+//
 // Note: ActivityInfo is defined in internal package, use public type activity.Info instead.
 func (e *TestWorkflowEnvironment) SetOnActivityCompletedListener(
 	listener func(activityInfo *ActivityInfo, result converter.EncodedValue, err error)) *TestWorkflowEnvironment {
@@ -740,6 +932,7 @@ func (e *TestWorkflowEnvironment) SetOnActivityCompletedListener(
 }
 
 // SetOnActivityCanceledListener sets a listener that will be called after an activity is canceled.
+//
 // Note: ActivityInfo is defined in internal package, use public type activity.Info instead.
 func (e *TestWorkflowEnvironment) SetOnActivityCanceledListener(
 	listener func(activityInfo *ActivityInfo)) *TestWorkflowEnvironment {
@@ -748,7 +941,10 @@ func (e *TestWorkflowEnvironment) SetOnActivityCanceledListener(
 }
 
 // SetOnActivityHeartbeatListener sets a listener that will be called when activity heartbeat.
+//
 // Note: ActivityInfo is defined in internal package, use public type activity.Info instead.
+//
+// Note: The provided listener may be called concurrently.
 //
 // Note: Due to internal caching by the activity system, this may not get called
 // for every heartbeat recorded. This is only called when the heartbeat would be
@@ -761,6 +957,7 @@ func (e *TestWorkflowEnvironment) SetOnActivityHeartbeatListener(
 }
 
 // SetOnChildWorkflowStartedListener sets a listener that will be called before a child workflow starts execution.
+//
 // Note: WorkflowInfo is defined in internal package, use public type workflow.Info instead.
 func (e *TestWorkflowEnvironment) SetOnChildWorkflowStartedListener(
 	listener func(workflowInfo *WorkflowInfo, ctx Context, args converter.EncodedValues)) *TestWorkflowEnvironment {
@@ -769,6 +966,7 @@ func (e *TestWorkflowEnvironment) SetOnChildWorkflowStartedListener(
 }
 
 // SetOnChildWorkflowCompletedListener sets a listener that will be called after a child workflow is completed.
+//
 // Note: WorkflowInfo is defined in internal package, use public type workflow.Info instead.
 func (e *TestWorkflowEnvironment) SetOnChildWorkflowCompletedListener(
 	listener func(workflowInfo *WorkflowInfo, result converter.EncodedValue, err error)) *TestWorkflowEnvironment {
@@ -777,6 +975,7 @@ func (e *TestWorkflowEnvironment) SetOnChildWorkflowCompletedListener(
 }
 
 // SetOnChildWorkflowCanceledListener sets a listener that will be called when a child workflow is canceled.
+//
 // Note: WorkflowInfo is defined in internal package, use public type workflow.Info instead.
 func (e *TestWorkflowEnvironment) SetOnChildWorkflowCanceledListener(
 	listener func(workflowInfo *WorkflowInfo)) *TestWorkflowEnvironment {
@@ -804,6 +1003,7 @@ func (e *TestWorkflowEnvironment) SetOnTimerCanceledListener(listener func(timer
 }
 
 // SetOnLocalActivityStartedListener sets a listener that will be called before local activity starts execution.
+//
 // Note: ActivityInfo is defined in internal package, use public type activity.Info instead.
 func (e *TestWorkflowEnvironment) SetOnLocalActivityStartedListener(
 	listener func(activityInfo *ActivityInfo, ctx context.Context, args []interface{})) *TestWorkflowEnvironment {
@@ -812,6 +1012,7 @@ func (e *TestWorkflowEnvironment) SetOnLocalActivityStartedListener(
 }
 
 // SetOnLocalActivityCompletedListener sets a listener that will be called after local activity is completed.
+//
 // Note: ActivityInfo is defined in internal package, use public type activity.Info instead.
 func (e *TestWorkflowEnvironment) SetOnLocalActivityCompletedListener(
 	listener func(activityInfo *ActivityInfo, result converter.EncodedValue, err error)) *TestWorkflowEnvironment {
@@ -820,10 +1021,32 @@ func (e *TestWorkflowEnvironment) SetOnLocalActivityCompletedListener(
 }
 
 // SetOnLocalActivityCanceledListener sets a listener that will be called after local activity is canceled.
+//
 // Note: ActivityInfo is defined in internal package, use public type activity.Info instead.
 func (e *TestWorkflowEnvironment) SetOnLocalActivityCanceledListener(
 	listener func(activityInfo *ActivityInfo)) *TestWorkflowEnvironment {
 	e.impl.onLocalActivityCanceledListener = listener
+	return e
+}
+
+func (e *TestWorkflowEnvironment) SetOnNexusOperationStartedListener(
+	listener func(service string, operation string, input converter.EncodedValue),
+) *TestWorkflowEnvironment {
+	e.impl.onNexusOperationStartedListener = listener
+	return e
+}
+
+func (e *TestWorkflowEnvironment) SetOnNexusOperationCompletedListener(
+	listener func(service string, operation string, result converter.EncodedValue, err error),
+) *TestWorkflowEnvironment {
+	e.impl.onNexusOperationCompletedListener = listener
+	return e
+}
+
+func (e *TestWorkflowEnvironment) SetOnNexusOperationCanceledListener(
+	listener func(service string, operation string),
+) *TestWorkflowEnvironment {
+	e.impl.onNexusOperationCanceledListener = listener
 	return e
 }
 
@@ -907,14 +1130,30 @@ func (e *TestWorkflowEnvironment) QueryWorkflow(queryType string, args ...interf
 	return e.impl.queryWorkflow(queryType, args...)
 }
 
-// UpdateWorkflow sends an update to the currently running workflow.
+// UpdateWorkflow sends an update to the currently running workflow. The updateName is the name of the update handler
+// to be invoked. The updateID is a unique identifier for the update. If updateID is an empty string a UUID will be generated.
+// The update callbacks are used to handle the update. The args are the arguments to be passed to the update handler.
 func (e *TestWorkflowEnvironment) UpdateWorkflow(updateName, updateID string, uc UpdateCallbacks, args ...interface{}) {
 	e.impl.updateWorkflow(updateName, updateID, uc, args...)
 }
 
 // UpdateWorkflowByID sends an update to a running workflow by its ID.
-func (e *TestWorkflowEnvironment) UpdateWorkflowByID(workflowID, updateName, updateID string, uc UpdateCallbacks, args interface{}) error {
-	return e.impl.updateWorkflowByID(workflowID, updateName, updateID, uc, args)
+func (e *TestWorkflowEnvironment) UpdateWorkflowByID(workflowID, updateName, updateID string, uc UpdateCallbacks, args ...interface{}) error {
+	return e.impl.updateWorkflowByID(workflowID, updateName, updateID, uc, args...)
+}
+
+// UpdateWorkflowNoRejection is a convenience function that handles a common test scenario of only validating
+// that an update isn't rejected.
+func (e *TestWorkflowEnvironment) UpdateWorkflowNoRejection(updateName string, updateID string, t mock.TestingT, args ...interface{}) {
+	uc := &TestUpdateCallback{
+		OnReject: func(err error) {
+			require.Fail(t, "update should not be rejected")
+		},
+		OnAccept:   func() {},
+		OnComplete: func(interface{}, error) {},
+	}
+
+	e.UpdateWorkflow(updateName, updateID, uc, args...)
 }
 
 // QueryWorkflowByID queries a child workflow by its ID and returns the result synchronously
@@ -982,13 +1221,15 @@ func (e *TestWorkflowEnvironment) SetTypedSearchAttributesOnStart(searchAttribut
 	return nil
 }
 
-// AssertExpectations  asserts that everything specified with OnActivity
-// in fact called as expected.  Calls may have occurred in any order.
+// AssertExpectations asserts that everything specified with OnWorkflow, OnActivity, OnNexusOperation
+// was in fact called as expected. Calls may have occurred in any order.
 func (e *TestWorkflowEnvironment) AssertExpectations(t mock.TestingT) bool {
-	return e.workflowMock.AssertExpectations(t) && e.activityMock.AssertExpectations(t)
+	return e.workflowMock.AssertExpectations(t) &&
+		e.activityMock.AssertExpectations(t) &&
+		e.nexusMock.AssertExpectations(t)
 }
 
-// AssertCalled asserts that the method was called with the supplied arguments.
+// AssertCalled asserts that the method (workflow or activity) was called with the supplied arguments.
 // Useful to assert that an Activity was called from within a workflow with the expected arguments.
 // Since the first argument is a context, consider using mock.Anything for that argument.
 //
@@ -999,10 +1240,10 @@ func (e *TestWorkflowEnvironment) AssertExpectations(t mock.TestingT) bool {
 // It can produce a false result when an argument is a pointer type and the underlying value changed after calling the mocked method.
 func (e *TestWorkflowEnvironment) AssertCalled(t mock.TestingT, methodName string, arguments ...interface{}) bool {
 	dummyT := &testing.T{}
-	if !(e.workflowMock.AssertCalled(dummyT, methodName, arguments...) || e.activityMock.AssertCalled(dummyT, methodName, arguments...)) {
-		return e.workflowMock.AssertCalled(t, methodName, arguments...) && e.activityMock.AssertCalled(t, methodName, arguments...)
-	}
-	return true
+	return e.AssertWorkflowCalled(dummyT, methodName, arguments...) ||
+		e.AssertActivityCalled(dummyT, methodName, arguments...) ||
+		e.AssertWorkflowCalled(t, methodName, arguments...) ||
+		e.AssertActivityCalled(t, methodName, arguments...)
 }
 
 // AssertWorkflowCalled asserts that the workflow method was called with the supplied arguments.
@@ -1017,14 +1258,15 @@ func (e *TestWorkflowEnvironment) AssertActivityCalled(t mock.TestingT, methodNa
 	return e.activityMock.AssertCalled(t, methodName, arguments...)
 }
 
-// AssertNotCalled asserts that the method was not called with the given arguments.
+// AssertNotCalled asserts that the method (workflow or activity) was not called with the given arguments.
 // See AssertCalled for more info.
 func (e *TestWorkflowEnvironment) AssertNotCalled(t mock.TestingT, methodName string, arguments ...interface{}) bool {
 	dummyT := &testing.T{}
-	if !(e.workflowMock.AssertNotCalled(dummyT, methodName, arguments...) || e.activityMock.AssertNotCalled(dummyT, methodName, arguments...)) {
-		return e.workflowMock.AssertNotCalled(t, methodName, arguments...) && e.activityMock.AssertNotCalled(t, methodName, arguments...)
-	}
-	return true
+	// Calling the individual functions instead of negating AssertCalled so the error message is more clear.
+	return e.AssertWorkflowNotCalled(dummyT, methodName, arguments...) &&
+		e.AssertActivityNotCalled(dummyT, methodName, arguments...) &&
+		e.AssertWorkflowNotCalled(t, methodName, arguments...) &&
+		e.AssertActivityNotCalled(t, methodName, arguments...)
 }
 
 // AssertWorkflowNotCalled asserts that the workflow method was not called with the given arguments.
@@ -1041,13 +1283,13 @@ func (e *TestWorkflowEnvironment) AssertActivityNotCalled(t mock.TestingT, metho
 	return e.activityMock.AssertNotCalled(t, methodName, arguments...)
 }
 
-// AssertNumberOfCalls asserts that a method was called expectedCalls times.
+// AssertNumberOfCalls asserts that a method (workflow or activity) was called expectedCalls times.
 func (e *TestWorkflowEnvironment) AssertNumberOfCalls(t mock.TestingT, methodName string, expectedCalls int) bool {
 	dummyT := &testing.T{}
-	if !(e.workflowMock.AssertNumberOfCalls(dummyT, methodName, expectedCalls) || e.activityMock.AssertNumberOfCalls(dummyT, methodName, expectedCalls)) {
-		return e.workflowMock.AssertNumberOfCalls(t, methodName, expectedCalls) && e.activityMock.AssertNumberOfCalls(t, methodName, expectedCalls)
-	}
-	return true
+	return e.workflowMock.AssertNumberOfCalls(dummyT, methodName, expectedCalls) ||
+		e.activityMock.AssertNumberOfCalls(dummyT, methodName, expectedCalls) ||
+		e.workflowMock.AssertNumberOfCalls(t, methodName, expectedCalls) ||
+		e.activityMock.AssertNumberOfCalls(t, methodName, expectedCalls)
 }
 
 // AssertWorkflowNumberOfCalls asserts that a workflow method was called expectedCalls times.
@@ -1060,4 +1302,23 @@ func (e *TestWorkflowEnvironment) AssertWorkflowNumberOfCalls(t mock.TestingT, m
 // Special method for activities, doesn't assert workflow calls.
 func (e *TestWorkflowEnvironment) AssertActivityNumberOfCalls(t mock.TestingT, methodName string, expectedCalls int) bool {
 	return e.activityMock.AssertNumberOfCalls(t, methodName, expectedCalls)
+}
+
+// AssertNexusOperationCalled asserts that the Nexus operation was called with the supplied arguments.
+// Special method for Nexus operations only.
+func (e *TestWorkflowEnvironment) AssertNexusOperationCalled(t mock.TestingT, service string, operation string, input any, options any) bool {
+	return e.nexusMock.AssertCalled(t, service, operation, input, options)
+}
+
+// AssertNexusOperationNotCalled asserts that the Nexus operation was called with the supplied arguments.
+// Special method for Nexus operations only.
+// See AssertNexusOperationCalled for more info.
+func (e *TestWorkflowEnvironment) AssertNexusOperationNotCalled(t mock.TestingT, service string, operation string, input any, options any) bool {
+	return e.nexusMock.AssertNotCalled(t, service, operation, input, options)
+}
+
+// AssertNexusOperationNumberOfCalls asserts that a Nexus operation was called expectedCalls times.
+// Special method for Nexus operation only.
+func (e *TestWorkflowEnvironment) AssertNexusOperationNumberOfCalls(t mock.TestingT, service string, expectedCalls int) bool {
+	return e.nexusMock.AssertNumberOfCalls(t, service, expectedCalls)
 }
