@@ -216,9 +216,8 @@ type (
 		// default: 1000
 		MaxConcurrentSessionExecutionSize int
 
-		// Uncomment this option when we support automatic restablish failed sessions.
 		// Optional: The identifier of the resource consumed by sessions.
-		// It's the user's responsibility to ensure there's only one worker using this resourceID.
+		// It's the user's responsibility to ensure there's only one running worker using this resourceID.
 		// For now, if user doesn't specify one, a new uuid will be used as the resourceID
 		// and session reestablishing is off.
 		SessionResourceID string

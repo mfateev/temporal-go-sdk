@@ -66,7 +66,7 @@ type (
 	// ReestablishTimeout: optional, default 0s
 	//     Specifies the timeout to attempt to reestablish session in case of worker failure.
 	//     By default, the session is not reestablished.
-	//     The session is reestablished only if the worker set worker.Options.SessionResourceID to the same value
+	//     The session is reestablished only if a worker after restart sets worker.Options.SessionResourceID to the same value
 	//     that was used to establish the original session.
 	//
 	// Exposed as: [go.temporal.io/sdk/workflow.SessionOptions]
@@ -318,7 +318,7 @@ func createSession(ctx Context, creationTaskQueue string, options *SessionOption
 
 	taskQueueChan := GetSignalChannel(ctx, sessionID) // use sessionID as channel name
 	// Retry is only needed when creating new session and the error returned is
-	// NewApplicationError(errTooManySessionsMsg). Therefore we make sure to
+	// NewApplicationError(errTooManySessionsMsg). Therefore, we make sure to
 	// disable retrying for start-to-close and heartbeat timeouts which can occur
 	// when attempting to retry a create-session on a different worker.
 	retryPolicy := &RetryPolicy{

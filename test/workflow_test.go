@@ -1829,7 +1829,7 @@ type AdvancedSessionParams struct {
 	RecreateAtIndex int
 }
 
-func (w Workflows) AdvancedSession(ctx workflow.Context, params *AdvancedSessionParams) error {
+func (w *Workflows) AdvancedSession(ctx workflow.Context, params *AdvancedSessionParams) error {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: time.Minute,
 		// No retry on activities
@@ -1907,7 +1907,7 @@ func (w Workflows) AdvancedSession(ctx workflow.Context, params *AdvancedSession
 	return nil
 }
 
-func (w Workflows) SessionFailedStateWorkflow(ctx workflow.Context, params *AdvancedSessionParams) error {
+func (w *Workflows) SessionFailedStateWorkflow(ctx workflow.Context, params *AdvancedSessionParams) error {
 	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
 		StartToCloseTimeout: 10 * time.Second,
 		// No retry on activities
@@ -1926,7 +1926,7 @@ func (w Workflows) SessionFailedStateWorkflow(ctx workflow.Context, params *Adva
 	opts := &workflow.SessionOptions{
 		CreationTimeout:  params.SessionCreationTimeout,
 		ExecutionTimeout: 20 * time.Second,
-		// Note the heartbeat timeout is less then half the activity timeout.
+		// Note the heartbeat timeout is less than half the activity timeout.
 		HeartbeatTimeout: 1 * time.Second,
 	}
 	sessionCtx, err := workflow.CreateSession(ctx, opts)
@@ -1942,6 +1942,40 @@ func (w Workflows) SessionFailedStateWorkflow(ctx workflow.Context, params *Adva
 		return errors.New("Expected activity to be canceled")
 	}
 	if workflow.GetSessionInfo(sessionCtx).SessionState != workflow.SessionStateFailed {
+		return errors.New("Session not in correct state")
+	}
+	return nil
+}
+
+func (w *Workflows) SessionReestablishingWorkflow(ctx workflow.Context) error {
+	ctx = workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		StartToCloseTimeout: 1 * time.Minute,
+	})
+
+	// Create a query to know sessions pending or started
+	var sessionsCreated int
+	err := workflow.SetQueryHandler(ctx, "sessions-created-equals", func(expected int) (bool, error) {
+		return sessionsCreated == expected, nil
+	})
+	if err != nil {
+		return err
+	}
+
+	opts := &workflow.SessionOptions{
+		CreationTimeout:  10 * time.Second,
+		ExecutionTimeout: 20 * time.Second,
+		// Note the heartbeat timeout is less than half the activity timeout.
+		HeartbeatTimeout: 1 * time.Second,
+	}
+	sessionCtx, err := workflow.CreateSession(ctx, opts)
+	if err != nil {
+		return err
+	}
+	sessionsCreated += 1
+	var act Activities
+	// The test should kill the worker and the session should be reestablished and reexecute the activity.
+	err = workflow.ExecuteActivity(sessionCtx, act.WaitForWorkerStop, time.Minute).Get(sessionCtx, nil)
+	if workflow.GetSessionInfo(sessionCtx).SessionState != workflow.SessionStateOpen {
 		return errors.New("Session not in correct state")
 	}
 	return nil
@@ -3519,6 +3553,7 @@ func (w *Workflows) register(worker worker.Worker) {
 	worker.RegisterWorkflow(w.UpsertTypedSearchAttributesWorkflow)
 	worker.RegisterWorkflow(w.ScheduleTypedSearchAttributesWorkflow)
 	worker.RegisterWorkflow(w.SessionFailedStateWorkflow)
+	worker.RegisterWorkflow(w.SessionReestablishingWorkflow)
 	worker.RegisterWorkflow(w.VersionLoopWorkflow)
 	worker.RegisterWorkflow(w.RaceOnCacheEviction)
 	worker.RegisterWorkflow(w.UpdateWithValidatorWorkflow)

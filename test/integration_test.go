@@ -101,6 +101,7 @@ type IntegrationTestSuite struct {
 	activities                *Activities
 	workflows                 *Workflows
 	worker                    worker.Worker
+	workerOptions             worker.Options
 	workerStopped             bool
 	tracer                    *tracingInterceptor
 	inboundSignalInterceptor  *signalInterceptor
@@ -220,16 +221,16 @@ func (ts *IntegrationTestSuite) SetupTest() {
 		panicPolicy = worker.BlockWorkflow
 	}
 
-	options := worker.Options{
+	ts.workerOptions = worker.Options{
 		Interceptors:        workerInterceptors,
 		WorkflowPanicPolicy: panicPolicy,
 	}
 
 	if strings.Contains(ts.T().Name(), "Session") {
-		options.EnableSessionWorker = true
+		ts.workerOptions.EnableSessionWorker = true
 		// Limit the session execution size
 		if strings.Contains(ts.T().Name(), "TestMaxConcurrentSessionExecutionSize") {
-			options.MaxConcurrentSessionExecutionSize = 3
+			ts.workerOptions.MaxConcurrentSessionExecutionSize = 3
 		}
 	}
 
@@ -240,27 +241,35 @@ func (ts *IntegrationTestSuite) SetupTest() {
 		worker.SetStickyWorkflowCacheSize(0)
 	}
 
+	if strings.Contains(ts.T().Name(), "TestSessionReestablishing") {
+		// the test reuses this on restart of the worker
+		ts.workerOptions.SessionResourceID = "session-resource-id1"
+		//if strings.Contains(ts.T().Name(), "TestSessionReestablishingTimeout") {
+		ts.workerOptions.SessionReestablishingInterval = 1 * time.Second
+		//}
+	}
+
 	if strings.Contains(ts.T().Name(), "LocalActivityWorkerOnly") {
-		options.LocalActivityWorkerOnly = true
+		ts.workerOptions.LocalActivityWorkerOnly = true
 	}
 
 	if strings.Contains(ts.T().Name(), "CancelTimerViaDeferAfterWFTFailure") ||
 		strings.Contains(ts.T().Name(), "TestNonDeterminismFailureCause") {
-		options.WorkflowPanicPolicy = worker.BlockWorkflow
+		ts.workerOptions.WorkflowPanicPolicy = worker.BlockWorkflow
 	}
 
 	if strings.Contains(ts.T().Name(), "GracefulActivityCompletion") {
-		options.WorkerStopTimeout = 10 * time.Second
+		ts.workerOptions.WorkerStopTimeout = 10 * time.Second
 	}
 
 	if strings.Contains(ts.T().Name(), "ReplayerWithInterceptor") {
-		options.Interceptors = append(options.Interceptors, &localActivityInterceptor{})
+		ts.workerOptions.Interceptors = append(ts.workerOptions.Interceptors, &localActivityInterceptor{})
 	}
 
 	if strings.Contains(ts.T().Name(), "SlotSupplierWontExceedLimits") {
-		options.MaxConcurrentWorkflowTaskExecutionSize = 2
-		options.MaxConcurrentActivityExecutionSize = 2
-		options.MaxConcurrentLocalActivityExecutionSize = 2
+		ts.workerOptions.MaxConcurrentWorkflowTaskExecutionSize = 2
+		ts.workerOptions.MaxConcurrentActivityExecutionSize = 2
+		ts.workerOptions.MaxConcurrentLocalActivityExecutionSize = 2
 	}
 	if strings.Contains(ts.T().Name(), "ResourceBasedSlotSupplier") {
 		tuner, err := resourcetuner.NewResourceBasedTuner(resourcetuner.ResourceBasedTunerOptions{
@@ -268,15 +277,15 @@ func (ts *IntegrationTestSuite) SetupTest() {
 			TargetCpu: 0.9,
 		})
 		ts.NoError(err)
-		options.Tuner = tuner
+		ts.workerOptions.Tuner = tuner
 	}
 	if strings.Contains(ts.T().Name(), "SlotSuppliersWithSession") {
-		options.MaxConcurrentActivityExecutionSize = 1
+		ts.workerOptions.MaxConcurrentActivityExecutionSize = 1
 		// Apparently this is on by default in these tests anyway, but to be explicit
-		options.EnableSessionWorker = true
+		ts.workerOptions.EnableSessionWorker = true
 	}
 
-	ts.worker = worker.New(ts.client, ts.taskQueueName, options)
+	ts.worker = worker.New(ts.client, ts.taskQueueName, ts.workerOptions)
 	ts.workerStopped = false
 	ts.registerWorkflowsAndActivities(ts.worker)
 	if strings.Contains(ts.T().Name(), "NoWorker") {
@@ -1812,6 +1821,38 @@ func (ts *IntegrationTestSuite) TestSessionStateFailedWorkerFailed() {
 	// Now create a new worker on that same task queue to resume the work of the
 	// workflow
 	nextWorker := worker.New(ts.client, ts.taskQueueName, worker.Options{})
+	ts.registerWorkflowsAndActivities(nextWorker)
+	ts.NoError(nextWorker.Start())
+	defer nextWorker.Stop()
+
+	// Get the result of the workflow run now
+	err = run.Get(ctx, nil)
+	ts.NoError(err)
+}
+
+func (ts *IntegrationTestSuite) TestSessionReestablishing() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ts.activities.manualStopContext = ctx
+	// We want to start a single long-running activity in a session
+	run, err := ts.client.ExecuteWorkflow(ctx,
+		ts.startWorkflowOptions("test-session-reestablishing"),
+		ts.workflows.SessionReestablishingWorkflow)
+	ts.NoError(err)
+
+	// Wait until session reestablishing times out
+	time.Sleep(time.Millisecond * 1500)
+
+	// Wait until sessions started
+	ts.waitForQueryTrue(run, "sessions-created-equals", 1)
+
+	// Kill the worker, this should cause the session to timeout.
+	ts.worker.Stop()
+	ts.workerStopped = true
+
+	// Now create a new worker on that same task queue to resume the work of the
+	// workflow
+	nextWorker := worker.New(ts.client, ts.taskQueueName, ts.workerOptions)
 	ts.registerWorkflowsAndActivities(nextWorker)
 	ts.NoError(nextWorker.Start())
 	defer nextWorker.Stop()
