@@ -99,18 +99,20 @@ type (
 
 	sessionEnvironmentImpl struct {
 		*sync.Mutex
-		doneChanMap               map[string]chan struct{}
-		resourceID                string
-		canRecreate               bool
-		resourceSpecificTaskQueue string
-		sessionTokenBucket        *sessionTokenBucket
+		doneChanMap map[string]chan struct{}
+		resourceID  string
+		canRecreate bool
+		// comes from the worker options
+		maxReestabilishingInterval time.Duration
+		resourceSpecificTaskQueue  string
+		sessionTokenBucket         *sessionTokenBucket
 	}
 
 	sessionCreationResponse struct {
-		TaskQueue   string
-		HostName    string
-		ResourceID  string
-		CanRecreate bool
+		TaskQueue                  string
+		HostName                   string
+		ResourceID                 string
+		MaxReestabilishingInterval time.Duration
 	}
 )
 
@@ -316,33 +318,6 @@ func createSession(ctx Context, creationTaskQueue string, options *SessionOption
 		return nil, err
 	}
 
-	taskQueueChan := GetSignalChannel(ctx, sessionID) // use sessionID as channel name
-	// Retry is only needed when creating new session and the error returned is
-	// NewApplicationError(errTooManySessionsMsg). Therefore, we make sure to
-	// disable retrying for start-to-close and heartbeat timeouts which can occur
-	// when attempting to retry a create-session on a different worker.
-	retryPolicy := &RetryPolicy{
-		InitialInterval:        time.Second,
-		BackoffCoefficient:     1.1,
-		MaximumInterval:        time.Second * 10,
-		MaximumAttempts:        0,
-		NonRetryableErrorTypes: []string{"TemporalTimeout:StartToClose", "TemporalTimeout:Heartbeat"},
-	}
-
-	heartbeatTimeout := defaultSessionHeartbeatTimeout
-	if options.HeartbeatTimeout != 0 {
-		heartbeatTimeout = options.HeartbeatTimeout
-	}
-	ao := ActivityOptions{
-		TaskQueue:              creationTaskQueue,
-		ScheduleToStartTimeout: options.CreationTimeout,
-		StartToCloseTimeout:    options.ExecutionTimeout,
-		HeartbeatTimeout:       heartbeatTimeout,
-	}
-	if retryable {
-		ao.RetryPolicy = retryPolicy
-	}
-
 	sessionInfo := &SessionInfo{
 		SessionID:    sessionID,
 		SessionState: SessionStateOpen,
@@ -355,12 +330,38 @@ func createSession(ctx Context, creationTaskQueue string, options *SessionOption
 	//   2. When completing session, we need to cancel both creation activity and all user activities, but
 	//      we can't cancel the completionCtx.
 	sessionCtx, sessionCancelFunc := WithCancel(completionCtx)
+
+	heartbeatTimeout := defaultSessionHeartbeatTimeout
+	if options.HeartbeatTimeout != 0 {
+		heartbeatTimeout = options.HeartbeatTimeout
+	}
+	ao := ActivityOptions{
+		TaskQueue:              creationTaskQueue,
+		ScheduleToStartTimeout: options.CreationTimeout,
+		StartToCloseTimeout:    options.ExecutionTimeout,
+		HeartbeatTimeout:       heartbeatTimeout,
+	}
+	if retryable {
+		// Retry is only needed when creating new session and the error returned is
+		// NewApplicationError(errTooManySessionsMsg). Therefore, we make sure to
+		// disable retrying for start-to-close and heartbeat timeouts which can occur
+		// when attempting to retry a create-session on a different worker.
+		retryPolicy := &RetryPolicy{
+			InitialInterval:        time.Second,
+			BackoffCoefficient:     1.1,
+			MaximumInterval:        time.Second * 10,
+			MaximumAttempts:        0,
+			NonRetryableErrorTypes: []string{"TemporalTimeout:StartToClose", "TemporalTimeout:Heartbeat"},
+		}
+		ao.RetryPolicy = retryPolicy
+	}
 	creationCtx := WithActivityOptions(sessionCtx, ao)
 	creationFuture := ExecuteActivity(creationCtx, sessionCreationActivityName, sessionID)
 
 	var creationErr error
 	var creationResponse sessionCreationResponse
 	s := NewSelector(creationCtx)
+	taskQueueChan := GetSignalChannel(ctx, sessionID) // use sessionID as channel name
 	s.AddReceive(taskQueueChan, func(c ReceiveChannel, more bool) {
 		c.Receive(creationCtx, &creationResponse)
 	})
@@ -387,12 +388,16 @@ func createSession(ctx Context, creationTaskQueue string, options *SessionOption
 			return
 		}
 		var canceledErr *CanceledError
-		if !errors.As(err, &canceledErr) {
-			getWorkflowEnvironment(creationCtx).RemoveSession(sessionID)
-			GetLogger(creationCtx).Debug("Session failed", "sessionID", sessionID, tagError, err)
-			sessionInfo.SessionState = SessionStateFailed
-			sessionCancelFunc()
+		if errors.As(err, &canceledErr) {
+			return
 		}
+		if creationResponse.MaxReestabilishingInterval > 0 {
+
+		}
+		getWorkflowEnvironment(creationCtx).RemoveSession(sessionID)
+		GetLogger(creationCtx).Debug("Session failed", "sessionID", sessionID, tagError, err)
+		sessionInfo.SessionState = SessionStateFailed
+		sessionCancelFunc()
 	})
 
 	logger.Debug("Created session", "sessionID", sessionID)
@@ -544,14 +549,15 @@ func (t *sessionTokenBucket) getToken() bool {
 	return true
 }
 
-func newSessionEnvironment(resourceID string, canRecreate bool, concurrentSessionExecutionSize int) sessionEnvironment {
+func newSessionEnvironment(resourceID string, canRecreate bool, maxReestabilishingInterval time.Duration, concurrentSessionExecutionSize int) sessionEnvironment {
 	return &sessionEnvironmentImpl{
-		Mutex:                     &sync.Mutex{},
-		doneChanMap:               make(map[string]chan struct{}),
-		resourceID:                resourceID,
-		canRecreate:               canRecreate,
-		resourceSpecificTaskQueue: getResourceSpecificTaskQueue(resourceID),
-		sessionTokenBucket:        newSessionTokenBucket(concurrentSessionExecutionSize),
+		Mutex:                      &sync.Mutex{},
+		doneChanMap:                make(map[string]chan struct{}),
+		resourceID:                 resourceID,
+		canRecreate:                canRecreate,
+		maxReestabilishingInterval: maxReestabilishingInterval,
+		resourceSpecificTaskQueue:  getResourceSpecificTaskQueue(resourceID),
+		sessionTokenBucket:         newSessionTokenBucket(concurrentSessionExecutionSize),
 	}
 }
 
@@ -581,10 +587,10 @@ func (env *sessionEnvironmentImpl) SignalCreationResponse(ctx context.Context, s
 
 func (env *sessionEnvironmentImpl) getCreationResponse() *sessionCreationResponse {
 	return &sessionCreationResponse{
-		TaskQueue:   env.resourceSpecificTaskQueue,
-		ResourceID:  env.resourceID,
-		HostName:    getHostName(),
-		CanRecreate: env.canRecreate,
+		TaskQueue:                  env.resourceSpecificTaskQueue,
+		ResourceID:                 env.resourceID,
+		HostName:                   getHostName(),
+		MaxReestabilishingInterval: env.maxReestabilishingInterval,
 	}
 }
 

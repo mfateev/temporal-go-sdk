@@ -229,7 +229,8 @@ type (
 		// When set to false the SessionResourceID is UUID, so no session reestablishing is possible.
 		ReestablishSession bool
 
-		SessionReestablishingInterval time.Duration
+		// On worker startup listen on a host specific task queue
+		MaxSessionReestablishingInterval time.Duration
 
 		ContextPropagators []ContextPropagator
 
@@ -441,7 +442,7 @@ func newSessionWorker(client *WorkflowClient, params workerExecutionParameters, 
 	if params.Identity == "" {
 		params.Identity = getWorkerIdentity(params.TaskQueue)
 	}
-	sessionEnvironment := newSessionEnvironment(params.SessionResourceID, params.ReestablishSession, params.MaxConcurrentSessionExecutionSize)
+	sessionEnvironment := newSessionEnvironment(params.SessionResourceID, params.ReestablishSession, params.MaxSessionReestablishingInterval, params.MaxConcurrentSessionExecutionSize)
 
 	creationTaskQueue := getCreationTaskQueue(params.TaskQueue)
 	params.UserContext = context.WithValue(params.UserContext, sessionEnvironmentContextKey, sessionEnvironment)
@@ -459,7 +460,7 @@ func newSessionWorker(client *WorkflowClient, params workerExecutionParameters, 
 
 	return &sessionWorker{
 		ReestablishSession:            params.ReestablishSession,
-		SessionReestablishingInterval: params.SessionReestablishingInterval,
+		SessionReestablishingInterval: params.MaxSessionReestablishingInterval,
 		creationWorker:                creationWorker,
 		activityWorker:                activityWorker,
 		logger:                        params.Logger,
@@ -472,7 +473,7 @@ func (sw *sessionWorker) Start() error {
 		return err
 	}
 	if sw.ReestablishSession {
-		// Only accepts creation requests on the resource specific task queue for SessionReestablishingInterval.
+		// Only accepts creation requests on the resource specific task queue for MaxSessionReestablishingInterval.
 		time.AfterFunc(sw.SessionReestablishingInterval, func() {
 			// The only error Start returns is due to invalid namespace
 			// The activityWorker.Start should catch it.
@@ -1776,7 +1777,7 @@ func NewAggregatedWorker(client *WorkflowClient, taskQueue string, options Worke
 		UserContextCancel:                     backgroundActivityContextCancel,
 		StickyScheduleToStartTimeout:          options.StickyScheduleToStartTimeout,
 		TaskQueueActivitiesPerSecond:          options.TaskQueueActivitiesPerSecond,
-		SessionReestablishingInterval:         options.SessionReestablishingInterval,
+		MaxSessionReestablishingInterval:      options.SessionReestablishingInterval,
 		MaxConcurrentSessionExecutionSize:     options.MaxConcurrentSessionExecutionSize,
 		WorkflowPanicPolicy:                   options.WorkflowPanicPolicy,
 		DataConverter:                         client.dataConverter,
