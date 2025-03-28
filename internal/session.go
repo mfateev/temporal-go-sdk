@@ -365,7 +365,7 @@ func createSession(ctx Context, creationTaskQueue string, options *SessionOption
 		c.Receive(creationCtx, &creationResponse)
 	})
 	s.AddFuture(creationFuture, func(f Future) {
-		// activity stoped before signal is received, must be creation timeout.
+		// activity stopped before signal is received, must be creation timeout.
 		creationErr = f.Get(creationCtx, nil)
 		GetLogger(creationCtx).Debug("Failed to create session", "sessionID", sessionID, tagError, creationErr)
 	})
