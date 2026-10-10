@@ -19,3 +19,9 @@ are small enough to propose upstream independently of the isolate runtime.
 
 These helpers do not change history commands, scheduling, codecs, or default
 behavior. Call sequence/flag helpers only while processing a workflow task.
+
+The branch's `Isolate integration bindings` CI uses standard Go 1.26.7 for the
+canonical quality checks, focused binding tests and reset/typed-attribute
+integration tests with default and zero workflow cache. Custom-toolchain builds,
+ownership checks and saved-history replay run in the Go isolates repository's
+native Linux/macOS arm64/amd64 CI.
