@@ -30,7 +30,7 @@ jobs:
             tail -n 100 "$RUNNER_TEMP/isolate-binding-logs/check.log"
             exit 1
           fi
-          if ! go run . unit-test -run TestWorkflowIntegration > "$RUNNER_TEMP/isolate-binding-logs/unit.log" 2>&1; then
+          if ! go run . unit-test -run TestWorkflowIntegration -log-dir "$RUNNER_TEMP/isolate-binding-logs/unit" > "$RUNNER_TEMP/isolate-binding-logs/unit.log" 2>&1; then
             tail -n 100 "$RUNNER_TEMP/isolate-binding-logs/unit.log"
             exit 1
           fi
@@ -41,7 +41,10 @@ jobs:
           set -euo pipefail
           for cache in default 0; do
             if [[ "$cache" == 0 ]]; then export WORKFLOW_CACHE_SIZE=0; else unset WORKFLOW_CACHE_SIZE; fi
-            if ! go run . integration-test -dev-server -run 'TestIntegrationSuite/(TestResetWorkflowExecutionWithChildren|TestChildWorkflowTypedSearchAttributes|TestWorkflowTypedSearchAttributes)$' > "$RUNNER_TEMP/isolate-binding-logs/integration-$cache.log" 2>&1; then
+            # The canonical runner persists this DB. Fixed workflow/reset IDs
+            # from the previous mode must not survive into a new task queue.
+            rm -f temporal.sqlite temporal.sqlite-shm temporal.sqlite-wal
+            if ! go run . integration-test -dev-server -log-dir "$RUNNER_TEMP/isolate-binding-logs/integration-$cache" -run 'TestIntegrationSuite/(TestResetWorkflowExecutionWithChildren|TestChildWorkflowTypedSearchAttributes|TestWorkflowTypedSearchAttributes)$' > "$RUNNER_TEMP/isolate-binding-logs/integration-$cache.log" 2>&1; then
               tail -n 100 "$RUNNER_TEMP/isolate-binding-logs/integration-$cache.log"
               exit 1
             fi
