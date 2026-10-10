@@ -22,6 +22,10 @@ to docs, or any other relevant information.
 
 ### Added
 
+- Fork integration bindings for previous-run failures, reset-aware child IDs,
+  memo encoding policy, and copied typed search-attribute updates. See
+  `ISOLATE_INTEGRATION.md`; the fork binding contract version is 1.
+
 ### Changed
 
 ### Deprecated

@@ -525,6 +525,9 @@ func processInternal(cfg config, file *os.File, pairs map[string]map[string]stri
 		return fmt.Errorf("failed to close file %s: %v", file.Name(), err)
 	}
 
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scan internal documentation: %w", err)
+	}
 	if changesMade {
 		absPath, err := filepath.Abs(file.Name())
 		if err != nil {
