@@ -1,9 +1,12 @@
 # Additional SDK integration bindings
 
 This branch starts from upstream v1.49.0. Ordinary Go SDK workflows retain their
-existing APIs and execution path. The patch adds four `internalbindings` helpers
+existing APIs and execution path. The patch adds five `internalbindings` helpers
 for external workflow dispatchers:
 
+- `GetCurrentRunID` reads the deterministic task run identity without consuming
+  a sequence ID. Reset updates it at the reset point; external dispatchers use it
+  to reseed named generators before admitting workflow continuations.
 - `GetLastFailure` reads previous-run failure metadata without exposing a private
   Go struct layout. Its borrowed protobuf is read-only and must be copied.
 - `GenerateChildWorkflowID` reserves the SDK's reset-aware child ID before an

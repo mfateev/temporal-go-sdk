@@ -22,6 +22,9 @@ to docs, or any other relevant information.
 
 ### Added
 
+- Add `internalbindings.GetCurrentRunID` for deterministic task run identity,
+  including reset transitions, without advancing the SDK sequence.
+
 - Fork integration bindings for previous-run failures, reset-aware child IDs,
   memo encoding policy, and copied typed search-attribute updates. See
   `ISOLATE_INTEGRATION.md`; the fork binding contract version is 1.

@@ -11,6 +11,12 @@ func GetLastFailureForIntegration(env WorkflowEnvironment) *failurepb.Failure {
 	return env.WorkflowInfo().lastFailure
 }
 
+// GetCurrentRunIDForIntegration returns the history run identity at this task.
+// Reset changes it at the reset point, independently of OriginalRunID.
+func GetCurrentRunIDForIntegration(env WorkflowEnvironment) string {
+	return env.WorkflowInfo().currentRunID
+}
+
 // GenerateChildWorkflowIDForIntegration reserves the same ID used by
 // ExecuteChildWorkflow. Pass the returned ID explicitly when scheduling; the
 // current run seed can change during reset, unlike OriginalRunID.

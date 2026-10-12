@@ -15,6 +15,12 @@ func GetLastFailure(env WorkflowEnvironment) *failurepb.Failure {
 	return internal.GetLastFailureForIntegration(env)
 }
 
+// GetCurrentRunID returns the deterministic, reset-aware run identity. Read it
+// before admitting workflow code on each task; it does not consume a sequence ID.
+func GetCurrentRunID(env WorkflowEnvironment) string {
+	return internal.GetCurrentRunIDForIntegration(env)
+}
+
 // GenerateChildWorkflowID reserves a child ID using the current reset-aware run
 // seed and SDK sequence. Use that ID in ExecuteWorkflowParams.WorkflowID.
 func GenerateChildWorkflowID(env WorkflowEnvironment) string {

@@ -28,8 +28,12 @@ func TestWorkflowIntegrationHistoryMetadata(t *testing.T) {
 	e.info.lastFailure = &failurepb.Failure{Message: "previous failure"}
 	require.Same(t, e.info.lastFailure, GetLastFailureForIntegration(e))
 	e.info.currentRunID, e.info.OriginalRunID = "current", "original"
+	require.Equal(t, "current", GetCurrentRunIDForIntegration(e))
+	require.Zero(t, e.sequence)
 	require.Equal(t, "current_1", GenerateChildWorkflowIDForIntegration(e))
 	e.info.currentRunID = "reset"
+	require.Equal(t, "reset", GetCurrentRunIDForIntegration(e))
+	require.Equal(t, int64(1), e.sequence)
 	require.Equal(t, "reset_2", GenerateChildWorkflowIDForIntegration(e))
 	require.False(t, UseMemoDataConverterForIntegration(e))
 	e.useUser = true
