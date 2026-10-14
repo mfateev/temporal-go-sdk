@@ -126,3 +126,12 @@ new one when you are ready to continue.
 
 Keep discussions respectful, constructive, and focused on the work. Clear context,
 specific examples, and patience with review feedback help everyone move faster.
+
+### Selecting the Go command
+
+Set `TEMPORAL_GO_COMMAND` to an executable name or absolute path when the build
+runner should use a specific compiler for SDK tests. For example, from
+`internal/cmd/build`,
+`TEMPORAL_GO_COMMAND=/path/to/golang-go/bin/tgo go run . unit-test` uses the POC
+compiler for SDK test binaries. The runner, analyzer tests, and tool installations
+use standard `go`. An unavailable configured command fails the run.

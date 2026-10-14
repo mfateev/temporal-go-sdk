@@ -16,6 +16,40 @@ import (
 	"time"
 )
 
+func TestConfiguredGoCommand(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEMPORAL_GO_COMMAND", executable)
+	t.Setenv("TEMPORAL_GO_COMMAND_TEST_HELPER", "1")
+	b := &builder{rootDir: t.TempDir()}
+	cmd := b.cmdFromRoot(goCommand(), "-test.run=^TestConfiguredGoCommandHelper$", "--", "version")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("configured compiler: %v\n%s", err, out)
+	}
+	if string(out) != "configured compiler: version\n" {
+		t.Fatalf("unexpected compiler output: %s", out)
+	}
+	// A missing configured compiler must fail instead of selecting go on PATH.
+	t.Setenv("TEMPORAL_GO_COMMAND", filepath.Join(t.TempDir(), "missing-tgo"))
+	if err := b.cmdFromRoot(goCommand(), "version").Run(); err == nil {
+		t.Fatal("missing configured compiler succeeded")
+	}
+	if got := b.cmdFromRoot("go", "vet", "./...").Args[0]; got != "go" {
+		t.Fatalf("tool command = %q, want standard go", got)
+	}
+}
+
+func TestConfiguredGoCommandHelper(t *testing.T) {
+	if os.Getenv("TEMPORAL_GO_COMMAND_TEST_HELPER") != "1" {
+		return
+	}
+	fmt.Println("configured compiler:", os.Args[len(os.Args)-1])
+	os.Exit(0)
+}
+
 func TestCheckModuleDirs(t *testing.T) {
 	rootDir := t.TempDir()
 	for _, moduleDir := range []string{

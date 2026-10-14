@@ -428,6 +428,7 @@ func (b *builder) integrationTest() error {
 		env = append(env, "TEMPORAL_IS_CLOUD_TESTS=true")
 	}
 	// Must run in test dir
+	args[0] = goCommand()
 	cmd := b.cmdFromRoot(args...)
 	cmd.Dir = filepath.Join(cmd.Dir, "test")
 	cmd.Env = env
@@ -624,6 +625,10 @@ func (b *builder) runUnitModule(moduleDir string, run string, coverage unitCover
 	}
 	args = append(args, "./...")
 
+	// Analyzer tests in the build-tool module require the standard Go compiler.
+	if moduleDir != b.thisDir {
+		args[0] = goCommand()
+	}
 	cmd := b.cmdFromRoot(args...)
 	cmd.Dir = moduleDir
 	return b.runTestCmd(cmd, output)
@@ -666,6 +671,14 @@ func writeFile(writer io.Writer, source string) error {
 		return fmt.Errorf("failed merging module output %q: %w", source, err)
 	}
 	return nil
+}
+
+// TEMPORAL_GO_COMMAND selects the compiler for SDK tests; tools use standard go.
+func goCommand() string {
+	if command := os.Getenv("TEMPORAL_GO_COMMAND"); command != "" {
+		return command
+	}
+	return "go"
 }
 
 func (b *builder) cmdFromRoot(args ...string) *exec.Cmd {

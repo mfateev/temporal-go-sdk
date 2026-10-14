@@ -22,6 +22,8 @@ to docs, or any other relevant information.
 
 ### Added
 
+- Allow the canonical build runner to select its Go compiler with `TEMPORAL_GO_COMMAND`, including the POC `tgo` command.
+
 - Add `internalbindings.GetCurrentRunID` for deterministic task run identity,
   including reset transitions, without advancing the SDK sequence.
 
